@@ -1,0 +1,127 @@
+---
+title: "Tina - BoW and Embeddings in R"
+author: "Tina, Aleksandr, Mike"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r Tinas_packages, warning=FALSE, message= FALSE}
+library(tidyverse)
+#library(tidymodels)
+library(stopwords)
+library(tm)
+library(textrecipes)
+library(textclean)
+library(textdata)
+library(wordsalad)
+
+# ================
+# Read and clean the data
+# ================
+
+
+questions <- read_csv("data/questions.csv")
+
+clean_data <- questions %>% 
+  mutate(text = str_replace_all(text, "\\[\\d+\\]|\n|https?://\\S+", " "),
+         text = str_to_lower(text),
+         text = replace_contraction(text), 
+         text = removeNumbers(text),
+         text = removePunctuation(text),
+         text = str_replace_all(text, "\\s+", " "))
+```
+
+```{R Tinas_recipe}
+# ==============================================================================
+# MODEL SETUP
+# ==============================================================================
+
+max_vocab_size <- 5000 # for BoW
+embedding_dim <- 100 # for embeddings NOTE: need to justify? 
+
+recipe_base <- recipe(~ text, data = clean_data) %>%
+  # convert to clean words (remove punctuation, convert to lowercase)
+  step_tokenize(text) %>%
+  # remove stopwords (Snowball lexicon)
+  step_stopwords(text) %>% 
+  # keep only the most frequent words (n=max_vocab_size)
+  step_tokenfilter(text, max_tokens = max_vocab_size) 
+```
+
+```{r TinasBoW}
+# ==============================================================================
+# ALTERNATIVE BAG OF WORDS
+# ==============================================================================
+
+# calculate term frequency (BoW)
+recipe_bow <- recipe_base %>%
+  step_tf(text)
+
+# apply transformation to the data to get BoW matrix
+bow_data <- bake(prep(recipe_bow), new_data = NULL, composition = "matrix")
+
+# combine word frequencies with party labels
+party_counts <- bind_cols(party = clean_data$party, as_tibble(bow_data)) %>% 
+  group_by(party) %>% 
+  # sum term frequencies across documents per party
+  summarize(across(everything(), sum)) %>% 
+  pivot_longer(-party, names_to = "word", values_to = "count") %>% 
+  # clean word names
+  mutate(word = str_remove(word, "^tf_text_"),
+         # word's share in total words used by party
+         prop_in_party = count / sum(count))
+```
+
+We have a small graph for the most frequent words in the next chunk. Please note that the questions suffer from prevalence of EC bullshit words, so we need to alter our list of stopwords to include them. Some are already included in the filter in the chunk, but it's advisable to remove the stopwords before doing BoW, i.e. in some of the previous chunks. 
+
+
+```{r BoW - Visualise}
+
+#Note: need further work on selecting words for this part. So far, we have lots of common "policy" words like ensure, rights, submitted 
+top_10 <- party_counts %>%
+  group_by(party) %>%
+  filter(!(word %in% c("eu", "european", "commission", "member", "can", "view", "submitted", "rights", "states", "state", "ensure" ))) %>%
+  arrange(desc(prop_in_party)) %>%
+  top_n(10, prop_in_party)
+
+ggplot(top_10, aes(x=word, y=prop_in_party)) + geom_bar(stat="identity") + facet_wrap(~party, ncol=2, scales="free") + theme_bw() + coord_flip()
+```
+
+Note: I set `eval=FALSE` to avoid unnecessary executions. Set to `TRUE` if you need to see how it works. And it works! But the Python version is considerably (!!!) faster. 
+
+```{r Tinas embeddings, eval=FALSE}
+# ==============================================================================
+# PRE-TRAINED EMBEDDINGS (GLOVE)
+# ==============================================================================
+
+# get embeddings
+glove <- glove(clean_data$text, dim = embedding_dim, 
+               stopwords = data_stopwords_snowball$en)
+
+# add GloVe embeddings
+recipe_glove <- recipe_base %>%
+  step_word_embeddings(text, embeddings = glove)
+
+# calculate GloVe embeddings per document
+glove_data <- bake(prep(recipe_glove), new_data = NULL, composition = "matrix")
+
+# ==============================================================================
+# PRE-TRAINED EMBEDDINGS (word2vec)
+# ==============================================================================
+
+# get embeddings
+word2vec <- word2vec(clean_data$text, dim = embedding_dim, 
+                     stopwords = data_stopwords_snowball$en)
+
+# add word2vec embeddings
+recipe_word2vec <- recipe_base %>%
+  step_word_embeddings(text, embeddings = word2vec)
+
+# calculate word2vec embeddings per document
+word2vec_data <- bake(prep(recipe_word2vec), new_data = NULL, composition = "matrix")
+```

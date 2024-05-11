@@ -1,0 +1,164 @@
+---
+title: "NLP - Rhython Workflow"
+author: "Tina, Aleksandr, Mike"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Note: if you don't have reticulate installed, please follow this short guide:
+https://www.r-bloggers.com/2022/04/getting-started-with-python-using-r-and-reticulate/ 
+```{r Packages, echo=FALSE, warning=FALSE, message= FALSE}
+library(tidyverse)
+library(qdap)
+library(dplyr)
+library(tm)
+library(wordcloud)
+library(plotrix)
+library(ggplot2)
+library(ggpubr)
+library(qdapRegex)
+library(stringr)
+library("DescTools")
+library(arrow)
+```
+
+```{python pySetUp, warning=FALSE, message = FALSE}
+import pandas as pd
+import numpy as np
+import string # Used to remove stopwords
+import nltk 
+from nltk.corpus import stopwords
+import gensim.downloader as api
+import json
+```
+
+Define some cleaning functions 
+
+```{python py_preprocess_func}
+def column_to_lower(df, column):
+    return df[column].str.lower()
+
+def column_remove_punctuation(df, column):
+    return df[column].str.replace('[{}]'.format(string.punctuation), '')
+
+def column_remove_stop_words(df, column, stopwords):
+    print(f"Currently processing the column: {column}")
+    return df[column].apply(lambda x: ' '.join([word for word in x.split() if word not in (stopwords)]))
+  
+def remove_references(text):
+    return re.sub(r"\[\d+\]", "", text)
+
+def remove_newlines(text):
+    return text.replace("\n", "")
+
+def remove_links(text):
+    return re.sub(r"https?://\S+", "", text)
+  
+#def remove_numbers(text):
+#    return re.sub(r"\d+", "", text)
+```
+
+```{python model download}
+glove_wiki_50_info = api.info('glove-wiki-gigaword-50')
+print(json.dumps(glove_wiki_50_info, indent=4))
+glove_vectors = api.load('glove-wiki-gigaword-50')
+```
+```{python test_glove}
+result = glove_vectors.most_similar(positive=['woman', 'king'], negative=['man'])
+print(f"Considering the word relationship (king, man) \n The model deems the pair (woman, ?) to be answered as ? = {result[0][0]} with score {result[0][1]} ")
+```
+
+```{python data_preprocess}
+
+# Get the data 
+questions = pd.read_csv("data/questions.csv")
+
+# Parse stop words
+stop_words = stopwords.words('english')
+
+# Clean the text 
+questions['text'] = column_to_lower(questions, 'text')
+questions['text'] = column_remove_punctuation(questions, 'text')
+questions['text'] = column_remove_stop_words(questions, 'text', stop_words)
+#questions['text'] = questions['text'].apply(remove_references)
+#questions['text'] = questions['text'].apply(remove_newlines)
+#questions['text'] = questions['text'].apply(remove_links)
+#questions['text'] = questions['text'].apply(remove_numbers)
+```
+
+```{python get embeddings}
+questions_embedded = []
+outside_of_vocab = []  # Just to keep record of the fraction of words outside of vocabulary
+
+for question in range(len(questions)):
+#for question in range(3):                  # Turn this line in case you need quick checks
+  sentence = questions.text[question]
+  parsed_sentence = sentence.lower().split()
+  num_words = len(parsed_sentence)
+  
+  word_vectors = []
+
+  words_outside = 0
+  # For each word in the sentence
+  # - Try to retrieve the corresponding word vector 
+  # - Append the word embedding  to a list
+  # once we have all word embeddings, we can simply take the average over the first dimension to gain an average embedding for the sentence 
+  for word in parsed_sentence:
+      try:
+          word_vector = glove_vectors[word]
+          word_vectors.append(word_vector)
+      except:
+          #print(f"Word '{word}' is not in the vocabulary.")
+          #print("Some word is not in the vocabulary!")
+          words_outside+=1
+  
+  questions_embedded.append(word_vectors)
+  outside_of_vocab.append(round((words_outside/num_words)*100, 2))
+  
+
+```
+
+```{python sum_embeddings}
+#Here, I sum the embeddings per document
+embeddings_summed = []
+for i in range(len(questions_embedded)):
+  summed_emb = [sum(elements) for elements in zip(*questions_embedded[i])]
+  embeddings_summed.append(summed_emb)
+```
+
+```{python embeddings_to_df}
+embeddings_df = pd.DataFrame(embeddings_summed)
+embeddings_df.to_csv("data/embeddings_python.csv", index=False)
+```
+
+
+================================================================================
+R PART
+
+================================================================================
+
+```{r load_embeddings}
+embeddings_df <- read.csv("data/embeddings_python.csv")
+
+```
+
+```{r PCA_embeddings}
+embeddings_df <- as.matrix(embeddings_df)
+embeddings_PCA <- prcomp(embeddings_df)
+```
+
+```{r PCA_vis}
+questions<- read.csv("data/questions.csv")
+
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(party = as.factor(questions$party)) %>%
+  ggplot(., aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3) + 
+  theme_bw() + facet_wrap(~party, nrow = 5)
+```
+
+
