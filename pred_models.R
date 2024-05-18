@@ -8,6 +8,9 @@ library(patchwork)
 # load questions and corresponding pooled embeddings
 questions <- read_csv("data/questions.csv")
 embeddings <- read_csv("data/embeddings_python.csv")
+# embeddings <- read_csv("data/embeddings_python_custom_max.csv")
+# embeddings <- read_csv("data/embeddings_python_custom_mean.csv")
+# embeddings <- read_csv("data/embeddings_python_custom_sum.csv")
 
 # list of countries per region
 regions <- list(
