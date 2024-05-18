@@ -1,0 +1,391 @@
+---
+title: "Manual Embeddings"
+author: "Tina, Aleksandr, Mike"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{python packages}
+import pandas as pd
+import numpy as np
+import string # Used to remove stopwords
+import nltk 
+from nltk.corpus import stopwords
+import gensim
+import json
+import re
+```
+
+```{python get_data}
+questions_data =  pd.read_csv("data/questions.csv")
+```
+
+```{python preprocess_functions}
+def column_to_lower(df, column):
+    return df[column].str.lower()
+
+def column_remove_punctuation(df, column):
+    return df[column].str.replace('[{}]'.format(string.punctuation), '')
+
+def column_remove_stop_words(df, column, stopwords):
+    print(f"Currently processing the column: {column}")
+    return df[column].apply(lambda x: ' '.join([word for word in x.split() if word not in (stopwords)]))
+  
+def remove_references(text):
+    return re.sub(r"\[\d+\]", "", text)
+
+def remove_newlines(text):
+    return text.replace("\n", "")
+
+def remove_links(text):
+    return re.sub(r"https?://\S+", "", text)
+
+```
+
+
+```{python libraries}
+import re  # For preprocessing
+import pandas as pd  # For data handling
+from time import time  # To time our operations
+from collections import defaultdict  # For word frequency
+```
+
+```{python cleaning }
+
+# Parse stop words
+stop_words = stopwords.words('english')
+custom_stop_words = ["eu", "european", "commission", "member", "can", "view", "submitted", "rights", "states", "state", "ensure", "union"]
+stop_words.extend(custom_stop_words)
+
+# Clean the text 
+questions_data['text'] = column_to_lower(questions_data, 'text')
+questions_data['text'] = column_remove_punctuation(questions_data, 'text')
+questions_data['text'] = column_remove_stop_words(questions_data, 'text', stop_words)
+questions_data['text'] = questions_data['text'].apply(remove_references)
+questions_data['text'] = questions_data['text'].apply(remove_newlines)
+questions_data['text'] = questions_data['text'].apply(remove_links)
+```
+
+```{python bigrams_1}
+
+from gensim.models.phrases import Phrases, Phraser
+sent = [row.split() for row in questions_data['text']]
+phrases = Phrases(sent, min_count=30, progress_per=10000)
+
+```
+
+```{python bigrams_2}
+bigram = Phraser(phrases)
+sentences = bigram[sent]
+```
+
+```{python sanity_check}
+word_freq = defaultdict(int)
+for sent in sentences:
+    for i in sent:
+        word_freq[i] += 1
+len(word_freq)
+
+sorted(word_freq, key=word_freq.get, reverse=True)[:10]
+```
+
+```{python set_up the model}
+import multiprocessing
+
+from gensim.models import Word2Vec
+
+cores = multiprocessing.cpu_count() # Count the number of cores in a computer
+
+
+w2v_model = Word2Vec(min_count=20,
+                     window=5, #Used to be 2 
+                     vector_size=300,
+                     sample=6e-5, 
+                     alpha=0.03, 
+                     min_alpha=0.0007, 
+                     negative=20,
+                     workers=cores-1)
+```
+
+
+```{python build the vocabulary}
+t = time()
+
+w2v_model.build_vocab(sentences, progress_per=10000)
+
+print('Time to build vocab: {} mins'.format(round((time() - t) / 60, 2)))
+```
+
+
+```{python train the model}
+t = time()
+
+w2v_model.train(sentences, total_examples=w2v_model.corpus_count, epochs=30, report_delay=1)
+
+print('Time to train the model: {} mins'.format(round((time() - t) / 60, 2)))
+
+w2v_model.init_sims(replace=True)
+```
+```{python sanity_check}
+similar_words = w2v_model.wv.most_similar(positive=["environment"])
+for word, similarity in similar_words:
+    print(f"{word}: {similarity}")
+    
+```
+
+```{python question-level-embeddings}
+questions_embedded = []
+outside_of_vocab = []  # Just to keep record of the fraction of words outside of vocabulary
+
+for question in range(len(questions_data)):
+#for question in range(3):                  # Turn this line in case you need quick checks
+  sentence = questions_data.text[question]
+  parsed_sentence = sentence.lower().split()
+  num_words = len(parsed_sentence)
+  
+  word_vectors = []
+
+  words_outside = 0
+  # For each word in the sentence
+  # - Try to retrieve the corresponding word vector 
+  # - Append the word embedding  to a list
+  # once we have all word embeddings, we can simply take the average over the first dimension to gain an average embedding for the sentence 
+  for word in parsed_sentence:
+      try:
+          word_vector = w2v_model.wv[word]
+          word_vectors.append(word_vector)
+      except:
+          #print(f"Word '{word}' is not in the vocabulary.")
+          #print("Some word is not in the vocabulary!")
+          words_outside+=1
+  
+  questions_embedded.append(word_vectors)
+  outside_of_vocab.append(round((words_outside/num_words)*100, 2))
+  
+
+```
+
+
+```{python sum_embeddings}
+#Here, I sum the embeddings per document
+summed_embeddings = []
+
+# Calculate mean embeddings per document
+for i in range(len(questions_embedded)):
+    # Sum elements in each list
+    summed_emb = [sum(elements) for elements in zip(*questions_embedded[i])]
+    summed_embeddings.append(summed_emb)
+    
+
+```
+
+```{python embeddings_to_df}
+embeddings_df = pd.DataFrame(summed_embeddings)
+embeddings_df.to_csv("data/embeddings_python_custom_sum.csv", index=False)
+```
+
+```{python mean_embeddings}
+mean_embeddings = []
+
+# Calculate mean embeddings per document
+for sentence_emb in questions_embedded:
+    # Sum all embeddings of all words in the sentence
+    summed_emb = [sum(dim) for dim in zip(*sentence_emb)]
+    # Calculate mean of the summed embeddings
+    mean_emb = [emb / len(sentence_emb) for emb in summed_emb]
+    mean_embeddings.append(mean_emb)
+```
+
+```{python embeddings_to_df_mean}
+embeddings_df = pd.DataFrame(mean_embeddings)
+embeddings_df.to_csv("data/embeddings_python_custom_mean.csv", index=False)
+```
+
+```{python max_embeddings}
+# Initialize list to store max embeddings
+max_embeddings = []
+
+# Calculate max embeddings per document
+for sentence_emb in questions_embedded:
+    # Transpose the list of embeddings to have dimensions (embedding_dimension, num_words_in_sentence)
+    transposed_emb = list(zip(*sentence_emb))
+    # Calculate max embedding for each dimension across all words in the sentence
+    max_emb = [max(dim) for dim in transposed_emb]
+    max_embeddings.append(max_emb)
+```
+
+```{python embeddings_to_df}
+embeddings_df = pd.DataFrame(max_embeddings)
+embeddings_df.to_csv("data/embeddings_python_custom_max.csv", index=False)
+```
+===============================================
+R PART
+===============================================
+
+
+```{r load_embeddings}
+embeddings_df <- read.csv("data/embeddings_python_custom_max.csv")
+
+```
+
+```{r PCA_embeddings}
+embeddings_df <- as.matrix(embeddings_df)
+embeddings_PCA <- prcomp(embeddings_df, center=FALSE)
+```
+
+```{r PCA_vis}
+questions<- read.csv("data/questions.csv")
+
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(party = as.factor(questions$party)) %>%
+  ggplot(., aes(x=PC2, y=PC3)) + 
+  geom_point(alpha=0.3) + 
+  theme_bw() + facet_wrap(~party, nrow = 5)
+```
+
+
+
+```{r clustering}
+library(cluster)
+
+clusters <- hclust(dist(embeddings_df))
+```
+
+```{r get clusters}
+
+cluster_labels <- cutree(clusters, k = 10)
+
+#write.csv(cluster_labels, "data/cluster_labels_max.csv", row.names=FALSE)
+```
+
+
+```{r clusters visualise}
+
+#cluster_labels<- read.csv("data/cluster_labels_sum.csv")
+#cluster_labels<- read.csv("data/cluster_labels_max.csv")
+
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(party = as.factor(questions$party),
+         cluster = as.factor(cluster_labels)) %>%
+  ggplot(., aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3, aes(colour=cluster)) + 
+  theme_bw() + facet_wrap(~party, nrow = 5)
+```
+
+```{r by date}
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(date = year(as.Date(questions$document_date)),
+         party = as.factor(questions$party),
+         cluster = as.factor(cluster_labels)) %>%
+  ggplot(., aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3, aes(colour=cluster)) + 
+  theme_bw() + facet_wrap(~date, nrow = 5)
+```
+
+```{r by gender}
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(date = year(as.Date(questions$document_date)),
+         party = as.factor(questions$party),
+         cluster = as.factor(cluster_labels),
+         gender = as.factor(questions$mep_gender)) %>%
+  ggplot(., aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3, aes(colour=gender)) + 
+  theme_bw() + facet_wrap(~party, nrow = 5)
+```
+```{r by country}
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(date = year(as.Date(questions$document_date)),
+         party = as.factor(questions$party),
+         cluster = as.factor(cluster_labels),
+         country = as.factor(questions$mep_citizenship)) %>%
+  ggplot(., aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3) + 
+  theme_bw() + facet_wrap(~country, nrow = 6)
+```
+
+
+```{r by topic}
+as.data.frame(embeddings_PCA$x) %>%
+  mutate(date = year(as.Date(questions$document_date)),
+         party = as.factor(questions$party),
+         cluster = as.factor(cluster_labels),
+         country = as.factor(questions$mep_citizenship),
+         question = questions$text) %>%
+  filter(str_detect(question, "trad")) %>%
+  ggplot(., aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3) + 
+  theme_bw() + facet_wrap(~country, nrow = 6)
+```
+```{r mean_embeddings}
+as.data.frame(embeddings_df) %>%
+  mutate(party = as.factor(questions$party)) %>%
+  group_by(party) %>%
+  summarise(across(everything(), list(mean)))
+```
+
+
+```{r mds 1}
+## Week 4 lecture code
+## Initialisation of packages and data
+if (!require("MASS")) install.packages("MASS")
+if (!require("plotrix")) install.packages("plotrix")
+if (!require("glmnet")) install.packages("glmnet")
+if (!require("splines2")) install.packages("splines2")
+if (!require("rgl")) install.packages("rgl")
+if (!require("plotrix")) install.packages("plotrix")
+if (!require("plot3D")) install.packages("plot3D")
+if (!require("dsmle")) install.packages("dsmle_1.0-4.tar.gz", 
+                                        repos = NULL, type = "source")
+if (!require("smacof")) install.packages("smacof")
+
+
+
+library(smacof)                            # Load the smacof package
+library(lsa)
+
+
+cosine_siimilarities<- cosine(embeddings_df)
+ttt <- outer(diag(cosine_siimilarities), diag(cosine_siimilarities)) / (cosine_siimilarities * t(cosine_siimilarities))
+ttt[is.infinite(ttt)] <- NA
+dis <- as.dist(log(ttt)) 
+dis[is.na(dis)] <- 1                       # Replace NA by 1
+res <- mds(dis)                            # Do ratio MDS with ndim = 2
+op <- par(mfrow = c(1, 2))                 # Two plots next to each other
+
+plot(res, las = 1, col = "red")            # Make a configuration plot
+plot(res, plot.type = "Shepard", las = 1,  # Make a Shepard plot
+     sub = paste("Stress-1 =",formatC(res$stress, digits = 6)))
+par(op)                                    # Return to a single plot
+
+```
+
+```{r mds_2}
+res.perm <- permtest(res, verbose = FALSE)
+op <- par(mfrow = c(1,2))
+hist(res.perm$stressvec, xlab = "Stress Values", main = "Histogram Permutations", xlim = c(0, .35))
+abline(v = quantile(res.perm$stressvec, c(0.025, 0.975)), col = "gray")
+abline(v = res$stress, col = "red", lwd = 2)
+plot(res.perm)
+par(op)
+
+plot(res, plot.type = "Shepard", las = 1,  # Make a Shepard plot
+     sub = paste("Stress-1 =",formatC(res$stress, digits = 6)))
+
+op <- par(mfrow = c(1,2)) 
+plot(res, plot.type = "stressplot", col="blue", las = "1",
+     label.conf = list(label = TRUE, col = "blue"))
+plot(res, plot.type = "bubbleplot", asp = 1, col="blue", , las = "1", 
+     label.conf = list(label = TRUE, col = "blue"))
+par(op)
+
+
+
+
+
+
+
+```
