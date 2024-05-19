@@ -12,26 +12,12 @@ embeddings <- read_csv("data/embeddings_python.csv")
 # embeddings <- read_csv("data/embeddings_python_custom_mean.csv")
 # embeddings <- read_csv("data/embeddings_python_custom_sum.csv")
 
-# list of countries per region
-regions <- list(
-  "Northern Europe" = c("Denmark", "Finland", "Sweden", "Estonia", "Latvia", "Lithuania", "Ireland", "United Kingdom"),
-  "Southern Europe" = c("Cyprus", "Italy", "Malta", "Greece"),
-  "Southwestern Europe" = c("Portugal", "Spain"),
-  "Western Europe" = c("Belgium", "Luxembourg", "Netherlands", "France"),
-  "Central Europe" = c("Austria","Germany"),
-  "Eastern Europe" = c("Bulgaria", "Czechia", "Croatia", "Hungary", "Poland", "Romania", "Slovakia", "Slovenia")
-) %>% 
-  unlist() %>% 
-  tibble(mep_citizenship = .,
-         region = names(.)) %>% 
-  mutate(region = factor(str_remove_all(region, "\\d")))
-
 # merge questions and embeddings
 data <- bind_cols(questions, embeddings) %>% 
   rename_with( ~ paste0("embed", .x), matches("^\\d+$")) %>% 
-  mutate(party = factor(ifelse(is.na(party), "unknown/multiple", party)),
-         date = decimal_date(document_date)) %>% 
-  left_join(regions, by = "mep_citizenship")
+  mutate(date = decimal_date(document_date),
+         party = factor(party),
+         region = factor(region))
 
 # formula: party ~ embeddings
 f_party <- as.formula(paste("party ~", paste(grep("^embed", names(data), value = TRUE), 
@@ -96,7 +82,8 @@ preds %>%
   pivot_longer(c("party", "region", "pred_party", "pred_region"),
                names_to = "model", values_to = "pred") %>% 
   separate(model, c("model", "var"), sep = "_", fill = "left") %>% 
-  mutate(model = ifelse(is.na(model), "Truth", "Prediction")) %>%
+  mutate(model = ifelse(is.na(model), "Truth", "Prediction"),
+         var = ifelse(var == "party", "Group", "Region")) %>%
   pivot_wider(names_from = model, values_from = pred) %>%
   group_by(var, Truth) %>% 
   mutate(n_truth = n()) %>% 
@@ -119,12 +106,12 @@ p1 <- preds %>%
                names_to = "model", values_to = "pred_date") %>%
   mutate(model = case_when(
     model == "pred_date" ~ "Model with all questions",
-    model == "pred_date_party" ~ "Separate models per party"
+    model == "pred_date_party" ~ "Separate models per group"
   )) %>%
   ggplot(aes(date, pred_date, color = party)) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
   geom_smooth(se = FALSE) +
-  labs(x = "True date", y = "Predicted date", color = "Party") +
+  labs(x = "True date", y = "Predicted date", color = "Group") +
   scale_x_continuous(breaks = 2019:2024) +
   facet_wrap(~ model) +
   theme_minimal()
@@ -151,7 +138,8 @@ preds %>%
   pivot_longer(c("party", "region", "pred_party", "pred_region"),
                names_to = "model", values_to = "pred") %>% 
   separate(model, c("model", "var"), sep = "_", fill = "left") %>% 
-  mutate(model = ifelse(is.na(model), "Truth", "Prediction")) %>% 
+  mutate(model = ifelse(is.na(model), "Truth", "Prediction"),
+         var = ifelse(var == "party", "Group", "Region")) %>% 
   pivot_wider(names_from = model, values_from = pred) %>%
   mutate(month = floor_date(date_decimal(date), "month")) %>%
   group_by(month, var, Truth) %>% 
@@ -163,4 +151,4 @@ preds %>%
   labs(x = "Date", y = "% of truth correctly predicted", color = "Truth") +
   facet_wrap(~ var) +
   theme_minimal()
-ggsave("results/accuracy_date.png", width = 10, height = 6)
+ggsave("results/accuracy_date.png", width = 10, height = 5)

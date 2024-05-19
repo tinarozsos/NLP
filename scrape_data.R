@@ -22,6 +22,20 @@ mepinfo <- read_csv("data/_meps_9_56_en.csv") %>%
          mep_birthday = as.Date(str_extract(mep_birthday, "[\\d-]*"), "%Y-%m-%d")) %>% 
   distinct(author1, .keep_all = TRUE)
 
+# list of countries per region
+regions <- list(
+  "Northern Europe" = c("Denmark", "Finland", "Sweden", "Estonia", "Latvia", "Lithuania", "Ireland", "United Kingdom"),
+  "Southern Europe" = c("Cyprus", "Italy", "Malta", "Greece"),
+  "Southwestern Europe" = c("Portugal", "Spain"),
+  "Western Europe" = c("Belgium", "Luxembourg", "Netherlands", "France"),
+  "Central Europe" = c("Austria","Germany"),
+  "Eastern Europe" = c("Bulgaria", "Czechia", "Croatia", "Hungary", "Poland", "Romania", "Slovakia", "Slovenia")
+) %>% 
+  unlist() %>% 
+  tibble(mep_citizenship = .,
+         region = names(.)) %>% 
+  mutate(region = factor(str_remove_all(region, "\\d")))
+
 # Read questions from URLs
 get_question <- function(url) {
   read_html(url) %>% 
@@ -44,6 +58,7 @@ questions <- questions_raw %>%
   mutate(party = str_extract(info, "\\(\\S*\\)$"),
          party = str_remove_all(party, "[()]"),
          party = ifelse(party == "EPP", "PPE", party), # unify French and English abbreviation
+         party = ifelse(is.na(party), "unknown/multiple", party),
          recipient = str_extract(info, "(?<=to the ).*(?=\\n)")) %>% 
   select(url, text, party, recipient) %>% 
   # add clean metadata from CSV files
@@ -56,8 +71,10 @@ questions <- questions_raw %>%
          author1 = str_replace(author1, "Glueck", "Glück"), # person's name spelled in multiple ways
          n_authors = str_count(document_creator_person, ";") + 1) %>%
   left_join(mepinfo) %>% 
+  # add regions to countries
+  left_join(regions, by = "mep_citizenship") %>% 
   # remove irrelevant variables
-  select(url:mep_identifier, mep_gender, mep_citizenship, mep_birthday)
+  select(url:mep_identifier, mep_gender, mep_citizenship, mep_birthday, region)
 
 # Save question text and metadata
 write_csv(questions, "data/questions.csv")
