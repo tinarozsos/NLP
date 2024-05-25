@@ -1,0 +1,215 @@
+---
+title: "LDA"
+author: "Tina, Aleksandr, Mike"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pacakges, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(textclean)
+library(stopwords)
+library(topicmodels)
+library(patchwork)
+library(textstem)
+library(textmineR)
+```
+
+
+```{r Tokenisation}
+# Tokenization ------------------------------------------------------------
+# improve with phrases, etc.
+
+library(sjmisc)
+
+questions <- read_csv("data/questions.csv")
+
+stopwords<- c(data_stopwords_snowball$en, 
+                      "eu", "european", "commission", "member", 
+                      "can", "view", "submitted", "rights", "states", 
+                      "state", "ensure" )
+words <- questions %>% 
+  mutate(text = str_replace_all(text, "\\[\\d+\\]|\n|https?://\\S+", " "),
+         text = replace_contraction(text), 
+         text = removeNumbers(text),
+         text = str_replace_all(text, "\\s+", " "),
+         text = lemmatize_strings(text))
+  
+
+# Extract unigrams
+unigrams <- words %>%
+  unnest_tokens(word, text, token = "words") %>%
+  filter(!(word %in% stopwords))
+
+# Extract bigrams & remove those containing stopwords 
+bigrams <- words %>%
+  unnest_tokens(word, text, token = "ngrams", n = 2) %>%
+  separate(word, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stopwords, 
+         !word2 %in% stopwords) %>%
+  unite(word, word1, word2, sep = " ")
+
+  
+words <- bind_rows(unigrams, bigrams)
+
+
+frequent_words <- words %>% 
+  count(word) %>% 
+  filter(n >= 20) %>%  # Adjust the threshold as needed
+  select(word)
+
+words <- words %>%
+  filter(word %in% frequent_words$word)
+
+```
+
+```{r LDA}
+# Fit LDA -----------------------------------------------------------------
+set.seed(123)
+# get document-term matrix
+
+proportion = 50
+
+
+dtm <- words %>% 
+  count(url, word) %>% 
+  bind_tf_idf(word, url, n) %>% 
+  # keep only words that appear in less than 90% of documents
+  slice_max(idf, prop = (proportion/100)) %>%
+  cast_dtm(url, word, n)
+
+
+dtm_lda <- Matrix::Matrix(as.matrix(dtm), sparse = T)
+
+```
+
+
+```{r lda_new}
+set.seed(123)
+
+n_topics = 20
+
+
+# Graph settings 
+width_height = 32
+font_size = 11 
+
+lda_model <- FitLdaModel(dtm = dtm_lda, 
+                        k = n_topics, 
+                        iterations = 1000,
+                        calc_coherence = T
+                        )
+```
+
+```{r lda_words}
+lda_word_topic <- GetTopTerms(lda_model$phi, 10) %>%  # Number of words you want to get (top 10 here)
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:n_topics)) #Make sure it's equal to the number of topics 
+```
+
+To avoid re-training the model, just load it from a file:
+
+```{r read the model}
+lda_model <- readRDS("lda_model.rds")
+
+```
+
+```{r lda_probs_per_topic}
+
+#word probabilities 
+
+word_topic_prob <- lda_model$phi
+
+# Per-topic per word probabilities 
+
+
+p1 <- as.data.frame(word_topic_prob) %>%
+  mutate(Topic = paste("Topic",as.character(c(1:n_topics)))) %>%
+  pivot_longer(-Topic, names_to="Word", values_to="Probability") %>%
+  group_by(Topic) %>%
+  slice_max(Probability, n = 10) %>% 
+    ggplot(aes(Probability, reorder(Word, Probability), fill = Topic)) + 
+    geom_col() +
+    labs(y = "", x = "Per-topic-per-word probability",
+         fill = "Topic") +
+    scale_x_continuous(n.breaks = 3) +
+    facet_wrap(~Topic, scales = "free_y") +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    theme(axis.text = element_text(size = font_size))
+  
+```
+
+```{r lda_distr_per_party}
+
+topic_probs<- lda_model$theta %>% 
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:n_topics)) %>% 
+   rownames_to_column("Question") %>%
+  left_join(questions[, c("party", "region", "mep_gender", "url")], by=c("Question"="url"))
+
+# NOTE!!!!!
+
+# Here I count question numbers based on the most probable topic per group 
+topic_levels <- paste0("Topic ", 1:n_topics) 
+p2 <-   topic_probs %>%
+  select(-region, -mep_gender) %>%
+  pivot_longer(-c("Question", "party"), names_to="Topic", values_to="Share") %>%
+  group_by(Question) %>%
+  filter(Share==max(Share)) %>%
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+  ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~party)+
+  labs(y = "# questions", x = "Topic", title="Distribution per political group") +
+  theme_minimal()+
+  theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
+```
+
+```{r topic dist per region}
+p3 <- topic_probs %>%
+  select(-party, -mep_gender) %>%
+  pivot_longer(-c("Question", "region"), names_to="Topic", values_to="Share") %>%
+  group_by(Question) %>%
+  filter(Share==max(Share)) %>%
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+  ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~region)+
+  labs(y = "# questions", x = "Topic", title="Distribution per region") +
+  theme_minimal()+
+  theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
+```
+
+
+```{r save the plot}
+
+  p1 / (p2 + p3) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+  ggsave(paste0("results/lda_", k, "proption_", proportion, ".png"), width = width_height, height = width_height)
+```
+
+```{r perplexity }
+
+# Extract the necessary components
+phi <- lda_model$phi  # Topic-word distribution
+theta <- lda_model$theta  # Document-topic distribution
+dtm <- dtm_lda  # Your document-term matrix
+
+# Function to compute the log-likelihood
+compute_log_likelihood <- function(dtm, phi, theta) {
+  likelihoods <- rowSums(dtm * log(phi %*% t(theta)))
+  return(sum(likelihoods))
+}
+
+# Calculate the log-likelihood
+log_likelihood <- compute_log_likelihood(dtm, phi, theta)
+
+# Calculate the number of words in the document-term matrix
+num_words <- sum(dtm)
+
+# Calculate perplexity
+perplexity <- exp(-log_likelihood / num_words)
+print(perplexity)
+```
