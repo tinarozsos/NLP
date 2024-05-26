@@ -13,7 +13,7 @@ topics <- lda$theta %>%
   mutate(across(c(party, region), factor))
 
 # word probabilities per topic
-topic_words <- lda$gamma %>% 
+topic_words <- lda$phi %>% 
   as_tibble() %>% 
   setNames(colnames(lda$data)) %>% 
   mutate(topic = paste("t", row_number(), sep = "_")) %>% 
@@ -28,12 +28,11 @@ topic_titles <- topic_words %>%
   pivot_wider(names_from = id, values_from = word) %>%
   unite(word, -topic, sep = ", ") %>% 
   ungroup() %>% 
-  mutate(title = c("Mediterranean agriculture", "asylum", "pollution",
-                   "animal agriculture", "Commission President + Erasmus program",
-                   "energy", "entrepreneurship", "cohesion", "legal jargon", "health care",
-                   "privacy and AI", "equality", "Middle East", "Turkey vs Cyprus",
+  mutate(title = c("trade", "asylum", "pollution", "livestock", "education",
+                   "energy", "employment", "cohesion", "legal proceedings", "health care",
+                   "tech and privacy", "equality", "Middle East", "Turkey vs Cyprus",
                    "nature", "transport", "elections", "finance", "COVID",
-                   "EU expansion"))
+                   "foreign policy"))
 
 # plot average topic probabilities per group and region
 topics %>% 
@@ -52,3 +51,25 @@ topics %>%
   facet_wrap(~ var, scales = "free_y") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+ggsave("results/lda_topic_prob.png", width = 10, height = 6)
+
+# plot topic distribution per group and region
+topics %>% 
+  pivot_longer(matches("^t_\\d+$"), names_to = "topic", values_to = "prob") %>%
+  pivot_longer(c(party, region), names_to = "var", values_to = "group") %>%
+  slice_max(prob, n = 1, by = url) %>%
+  count(group, var, topic) %>%
+  group_by(group, var) %>% 
+  mutate(prop = n/sum(n)) %>%
+  mutate(var = ifelse(var == "party", "Group", "Region")) %>% 
+  left_join(topic_titles) %>% 
+  mutate(topic = paste(str_remove(topic, "t_"), title, sep = ": ")) %>%
+  ggplot(aes(topic, group, fill = prop)) +
+  geom_tile() +
+  geom_hline(yintercept = 1.5:8.5, color = "white", linewidth = 1) +
+  labs(x = "Topic", y = NULL, fill = "Fraction of group's\nquestions in topic") +
+  scale_fill_viridis(option = "mako") +
+  facet_wrap(~ var, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+ggsave("results/lda_topic_class.png", width = 10, height = 6)
