@@ -2,6 +2,7 @@ library(tidyverse)
 library(tidymodels)
 library(viridis)
 library(patchwork)
+library(ggridges)
 
 # Data --------------------------------------------------------------------
 
@@ -36,33 +37,34 @@ model_multilogit <- multinom_reg()
 # linear regression
 model_linreg <- linear_reg()
 
-pred_model <- function(formula, model, data, pred_name = ".pred") {
-  workflow() %>% 
+pred_model <- function(formula, model, data, pred_suffix = ".pred", pred_type = list("class", "prob")) {
+  fit <- workflow() %>% 
     add_model(model) %>% 
     add_formula(formula) %>% 
-    fit(data) %>% 
-    predict(data) %>% 
-    bind_cols(select(data, url)) %>% 
-    setNames(c(pred_name, "url"))
+    fit(data) 
+  
+  map_dfc(pred_type, ~predict(fit, data, type = .)) %>% 
+    rename_with(~ paste(.x, pred_suffix, sep = "_"), everything()) %>%
+    bind_cols(select(data, url))
 }
 
 # Model fitting -----------------------------------------------------------
 
 # party ~ embedding
-pred_party <- pred_model(f_party, model_multilogit, data, "pred_party")
+pred_party <- pred_model(f_party, model_multilogit, data, "party")
 # date ~ embedding
-pred_date <- pred_model(f_date, model_linreg, data, "pred_date")
+pred_date <- pred_model(f_date, model_linreg, data, "date", "numeric")
 # region ~ embedding
-pred_region <- pred_model(f_region, model_multilogit, data, "pred_region")
+pred_region <- pred_model(f_region, model_multilogit, data, "region")
 # date ~ embedding per party
 pred_date_party <- map_df(
   unique(data$party), 
-  ~ pred_model(f_date, model_linreg, filter(data, party == .x), "pred_date_party")
+  ~ pred_model(f_date, model_linreg, filter(data, party == .x), "date_party", "numeric")
 )
 # date ~ embedding per region
 pred_date_region <- map_df(
   unique(data$region), 
-  ~ pred_model(f_date, model_linreg, filter(data, region == .x), "pred_date_region")
+  ~ pred_model(f_date, model_linreg, filter(data, region == .x), "date_region", "numeric")
 )
 
 # merge predictions with questions
@@ -79,8 +81,9 @@ write_csv(preds, "results/predictions.csv")
 
 # party classification confusion matrix
 preds %>% 
-  pivot_longer(c("party", "region", "pred_party", "pred_region"),
-               names_to = "model", values_to = "pred") %>% 
+  select(url, party, region, .pred_class_party, .pred_class_region) %>%
+  pivot_longer(-url, names_to = "model", values_to = "pred") %>% 
+  mutate(model = str_remove(model, "class_")) %>%
   separate(model, c("model", "var"), sep = "_", fill = "left") %>% 
   mutate(model = ifelse(is.na(model), "Truth", "Prediction"),
          var = ifelse(var == "party", "Group", "Region")) %>%
@@ -102,11 +105,11 @@ ggsave("results/confusion_matrix.png", width = 12, height = 6)
 
 # date predictions
 p1 <- preds %>%
-  pivot_longer(c("pred_date", "pred_date_party"),
+  pivot_longer(c(".pred_date", ".pred_date_party"),
                names_to = "model", values_to = "pred_date") %>%
   mutate(model = case_when(
-    model == "pred_date" ~ "Model with all questions",
-    model == "pred_date_party" ~ "Separate models per group"
+    model == ".pred_date" ~ "Model with all questions",
+    model == ".pred_date_party" ~ "Separate models per group"
   )) %>%
   ggplot(aes(date, pred_date, color = party)) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
@@ -116,11 +119,11 @@ p1 <- preds %>%
   facet_wrap(~ model) +
   theme_minimal()
 p2 <- preds %>%
-  pivot_longer(c("pred_date", "pred_date_region"),
+  pivot_longer(c(".pred_date", ".pred_date_region"),
                names_to = "model", values_to = "pred_date") %>%
   mutate(model = case_when(
-    model == "pred_date" ~ "Model with all questions",
-    model == "pred_date_region" ~ "Separate models per region"
+    model == ".pred_date" ~ "Model with all questions",
+    model == ".pred_date_region" ~ "Separate models per region"
   )) %>%
   ggplot(aes(date, pred_date, color = region)) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
@@ -135,12 +138,13 @@ ggsave("results/date_pred.png", width = 10, height = 8)
 
 # party/region accuracy over time
 preds %>% 
-  pivot_longer(c("party", "region", "pred_party", "pred_region"),
-               names_to = "model", values_to = "pred") %>% 
+  select(url, date, party, region, .pred_class_party, .pred_class_region) %>%
+  pivot_longer(-c(url, date), names_to = "model", values_to = "pred") %>% 
+  mutate(model = str_remove(model, "class_")) %>%
   separate(model, c("model", "var"), sep = "_", fill = "left") %>% 
   mutate(model = ifelse(is.na(model), "Truth", "Prediction"),
-         var = ifelse(var == "party", "Group", "Region")) %>% 
-  pivot_wider(names_from = model, values_from = pred) %>%
+         var = ifelse(var == "party", "Group", "Region")) %>%
+  pivot_wider(names_from = model, values_from = pred)  %>%
   mutate(month = floor_date(date_decimal(date), "month")) %>%
   group_by(month, var, Truth) %>% 
   mutate(n_truth = n()) %>% 
@@ -152,3 +156,64 @@ preds %>%
   facet_wrap(~ var) +
   theme_minimal()
 ggsave("results/accuracy_date.png", width = 10, height = 5)
+
+# average prediction probabilities
+p1 <- preds %>% 
+  select(url, party, matches(".pred_.*_party")) %>% 
+  select(-matches("_(class|date)_")) %>% 
+  pivot_longer(starts_with(".pred"), names_to = "model", values_to = "pred") %>%
+  separate(model, c("model", "Prediction", "var"), sep = "_") %>%
+  select(url, Truth = party, Prediction, pred) %>%
+  group_by(Truth, Prediction) %>% 
+  summarize(mean_pred = mean(pred)) %>% 
+  ungroup() %>% 
+  mutate(same = Truth == Prediction) %>%
+  ggplot(aes(Truth, mean_pred, color = Prediction)) +
+  geom_point(aes(shape = same), size = 2, show.legend = FALSE) +
+  geom_line(aes(group = Prediction), key_glyph = "point") +
+  labs(y = "Average predicted probability") +
+  scale_shape_manual(values = c(1, 19)) +
+  theme_minimal() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+p2 <- preds %>% 
+  select(url, region, matches(".pred_.*_region")) %>% 
+  select(-matches("_(class|date)_")) %>% 
+  pivot_longer(starts_with(".pred"), names_to = "model", values_to = "pred") %>%
+  separate(model, c("model", "Prediction", "var"), sep = "_") %>%
+  select(url, Truth = region, Prediction, pred) %>%
+  group_by(Truth, Prediction) %>% 
+  summarize(mean_pred = mean(pred)) %>% 
+  ungroup() %>% 
+  mutate(same = Truth == Prediction) %>%
+  ggplot(aes(Truth, mean_pred, color = Prediction)) +
+  geom_point(aes(shape = same), size = 2, show.legend = FALSE) +
+  geom_line(aes(group = Prediction), key_glyph = "point") +
+  labs(y = "Average predicted probability",
+       caption = "Filled circle: own group/region") +
+  scale_shape_manual(values = c(1, 19)) +
+  theme_minimal() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+p1 + p2
+ggsave("results/average_pred_prob.png", width = 12, height = 6)
+
+# distribution of predictions for own group vs other groups
+preds %>% 
+  select(url:`.pred_Western Europe_region`) %>% 
+  select(-contains("_class_")) %>% 
+  pivot_longer(starts_with(".pred"), names_to = "model", values_to = "pred") %>%
+  separate(model, c("model", "Prediction", "var"), sep = "_") %>%
+  mutate(match = ifelse(var == "party", party == Prediction, region == Prediction),
+         match = ifelse(match, "Predictions for own group", "Predictions for all other observations"),
+         var = ifelse(var == "party", "Political groups", "Regions")) %>% 
+  select(url, match, Prediction, pred, var) %>%
+  ggplot(aes(pred, fct_rev(Prediction), fill = match)) +
+  geom_density_ridges(alpha = 0.75, scale = 1.25) +
+  labs(x = "Predicted probability", fill = NULL) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  scale_fill_manual(values = c("grey", "coral")) +
+  facet_wrap(~ var, scales = "free_y") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+ggsave("results/pred_prob_density.png", width = 8, height = 8)
