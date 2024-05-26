@@ -210,7 +210,7 @@ preds %>%
   select(url, match, Prediction, pred, var) %>%
   ggplot(aes(pred, fct_rev(Prediction), fill = match)) +
   geom_density_ridges(alpha = 0.75, scale = 1.25) +
-  labs(x = "Predicted probability", fill = NULL) +
+  labs(x = "Predicted probability", y = "Prediction", fill = NULL) +
   guides(fill = guide_legend(reverse = TRUE)) +
   scale_fill_manual(values = c("grey", "coral")) +
   facet_wrap(~ var, scales = "free_y") +
