@@ -1,49 +1,86 @@
 library(tidyverse)
+library(readxl)
+library(tidytext)
 library(patchwork)
 
+# main data
 questions <- read_csv("data/questions.csv")
+# number of MEPs per party
+parties <- read_excel("data/party_descriptions.xlsx")
+# number of MEPs per country
+countries <- read_csv("data/mep_party.csv") %>% count(country) 
 
-p1 <- questions %>% 
-  mutate(length = str_count(text, "\\s+") + 1) %>%
-  ggplot(aes(length, fill = party)) +
-  geom_density(alpha = 0.4) +
-  labs(x = "Number of words per question",
-       y = "Density",
-       fill = "Group") +
-  guides(fill = guide_legend(override.aes = list(alpha = 1, color = NULL))) +
-  theme_minimal() +
-  theme(legend.position = c(0.8, 0.6),
-        legend.background = element_rect(fill = "white"))
+# list of countries per region
+regions <- list(
+  "Northern Europe" = c("Denmark", "Finland", "Sweden", "Estonia", "Latvia", "Lithuania", "Ireland", "United Kingdom"),
+  "Southern Europe" = c("Cyprus", "Italy", "Malta", "Greece"),
+  "Southwestern Europe" = c("Portugal", "Spain"),
+  "Western Europe" = c("Belgium", "Luxembourg", "Netherlands", "France"),
+  "Central Europe" = c("Austria","Germany"),
+  "Eastern Europe" = c("Bulgaria", "Czechia", "Croatia", "Hungary", "Poland", "Romania", "Slovakia", "Slovenia")
+) %>% 
+  unlist() %>% 
+  tibble(country = .,
+         region = names(.)) %>% 
+  mutate(region = factor(str_remove_all(region, "\\d")))
 
-p2 <- questions %>% 
-  mutate(length = str_count(text, "\\s+") + 1) %>%
-  ggplot(aes(length, fill = region)) +
-  geom_density(alpha = 0.4) +
-  labs(x = "Number of words per question",
-       y = "Density",
-       fill = "Region") +
-  guides(fill = guide_legend(override.aes = list(alpha = 1, color = NULL))) +
-  theme_minimal() +
-  theme(legend.position = c(0.8, 0.6),
-        legend.background = element_rect(fill = "white"))
+# p1 <- questions %>% 
+#   mutate(length = str_count(text, "\\s+") + 1) %>%
+#   ggplot(aes(length, fill = party)) +
+#   geom_density(alpha = 0.4) +
+#   labs(x = "Number of words per question",
+#        y = "Density",
+#        fill = "Group") +
+#   guides(fill = guide_legend(override.aes = list(alpha = 1, color = NULL))) +
+#   theme_minimal() +
+#   theme(legend.position = c(0.8, 0.6),
+#         legend.background = element_rect(fill = "white"))
+# 
+# p2 <- questions %>% 
+#   mutate(length = str_count(text, "\\s+") + 1) %>%
+#   ggplot(aes(length, fill = region)) +
+#   geom_density(alpha = 0.4) +
+#   labs(x = "Number of words per question",
+#        y = "Density",
+#        fill = "Region") +
+#   guides(fill = guide_legend(override.aes = list(alpha = 1, color = NULL))) +
+#   theme_minimal() +
+#   theme(legend.position = c(0.8, 0.6),
+#         legend.background = element_rect(fill = "white"))
 
-p3 <- questions %>% 
-  count(party) %>% 
-  ggplot(aes(n, reorder(party, n), fill = party)) +
+# merge counts of questions per party and per region
+bind_rows(
+  questions %>%
+    count(party) %>% 
+    # add number of seats per party
+    left_join(select(parties, party, seats)) %>% 
+    rename(group = party) %>% 
+    # add id variable for facetting
+    mutate(type = "group"),
+  questions %>% 
+    count(region) %>% 
+    # add number of seats per region
+    left_join(countries %>% left_join(regions) %>% group_by(region) %>% summarise(seats = sum(n))) %>% 
+    rename(group = region) %>% 
+    # add id variable for facetting
+    mutate(type = "region")
+) %>% 
+  # calculate number of questions per seat per group
+  mutate(n_per_group = n / seats) %>%
+  pivot_longer(cols = c(n, n_per_group)) %>%
+  # nicer labels
+  mutate(name = ifelse(name == "n", "Number of questions", "Number of questions per MEP"),
+         name = paste(name, type, sep = " per ")) %>% 
+  # plot with bars rearranged within panels
+  ggplot(aes(value, reorder_within(group, value, name), fill = group)) +
   geom_col() +
-  labs(x = "Number of questions",
-       y = "Group") +
+  labs(x = NULL,
+       y = NULL) +
+  scale_y_reordered() +
+  facet_wrap(~name, dir = "v", scales = "free", strip.position = "bottom") +
   theme_minimal() +
-  theme(legend.position = "none")
-
-p4 <- questions %>% 
-  count(region) %>% 
-  ggplot(aes(n, reorder(region, n), fill = region)) +
-  geom_col() +
-  labs(x = "Number of questions",
-       y = "Region") +
-  theme_minimal() +
-  theme(legend.position = "none")
-
-(p1 + p2) /  (p3 + p4)
-ggsave("results/counts.png", width = 10, height = 7)
+  theme(legend.position = "none",
+        strip.placement = "outside",
+        axis.text = element_text(size = 12),
+        strip.text = element_text(size = 12))
+ggsave("results/counts.png", width = 10, height = 5)

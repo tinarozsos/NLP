@@ -37,6 +37,7 @@ mep_party <- map_df(
            nationalPoliticalGroup == "arbetarepartietsocialdemokraterna" ~ "socialdemokraterna",
            TRUE ~ nationalPoliticalGroup
          ))
+write_csv(mep_party, "data/mep_party.csv")
 
 # get political group orientations as weighted mean of national party orientations
 orientations <- mep_party %>% 
