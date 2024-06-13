@@ -1,0 +1,459 @@
+---
+title: "LDA"
+author: "Tina, Aleksandr, Mike"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pacakges, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(textclean)
+library(stopwords)
+library(topicmodels)
+library(patchwork)
+library(textstem)
+library(textmineR)
+library(cluster)
+library(quanteda)
+
+#remotes::install_github("quanteda/quanteda.sentiment")
+library("quanteda", warn.conflicts = FALSE, quietly = TRUE)
+library("quanteda.sentiment")
+library(quanteda.textstats)
+library(SentimentAnalysis)
+
+```
+
+
+```{r Tokenisation}
+# Tokenization ------------------------------------------------------------
+# improve with phrases, etc.
+
+library(sjmisc)
+
+questions <- read_csv("data/questions.csv")
+
+stopwords<- c(data_stopwords_snowball$en, 
+                      "eu", "european", "commission", "member", 
+                      "can", "view", "submitted", "rights", "states", 
+                      "state", "ensure" )
+words <- questions %>% 
+  mutate(text = str_replace_all(text, "\\[\\d+\\]|\n|https?://\\S+", " "),
+         text = replace_contraction(text), 
+         text = removeNumbers(text),
+         text = str_replace_all(text, "\\s+", " "),
+         text = lemmatize_strings(text))
+  
+
+# Extract unigrams
+unigrams <- words %>%
+  unnest_tokens(word, text, token = "words") %>%
+  filter(!(word %in% stopwords))
+
+# Extract bigrams & remove those containing stopwords 
+bigrams <- words %>%
+  unnest_tokens(word, text, token = "ngrams", n = 2) %>%
+  separate(word, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stopwords, 
+         !word2 %in% stopwords) %>%
+  unite(word, word1, word2, sep = " ")
+
+  
+words <- bind_rows(unigrams, bigrams)
+
+
+frequent_words <- words %>% 
+  count(word) %>% 
+  filter(n >= 20) %>%  # Adjust the threshold as needed
+  select(word)
+
+words <- words %>%
+  filter(word %in% frequent_words$word)
+
+```
+
+```{r LDA}
+# Fit LDA -----------------------------------------------------------------
+set.seed(123)
+# get document-term matrix
+
+proportion = 50
+
+
+dtm <- words %>% 
+  count(url, word) %>% 
+  bind_tf_idf(word, url, n) %>% 
+  # keep only words that appear in less than 90% of documents
+  slice_max(idf, prop = (proportion/100)) %>%
+  cast_dtm(url, word, n)
+
+
+dtm_lda <- Matrix::Matrix(as.matrix(dtm), sparse = T)
+
+```
+
+
+```{r lda_new}
+set.seed(123)
+
+n_topics = 20
+
+
+# Graph settings 
+width_height = 32
+font_size = 11 
+
+lda_model <- FitLdaModel(dtm = dtm_lda, 
+                        k = n_topics, 
+                        iterations = 1000,
+                        calc_coherence = T
+                        )
+```
+
+```{r lda_words}
+lda_word_topic <- GetTopTerms(lda_model$phi, 10) %>%  # Number of words you want to get (top 10 here)
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:n_topics)) #Make sure it's equal to the number of topics 
+```
+
+To avoid re-training the model, just load it from a file:
+
+```{r read the model}
+lda_model <- readRDS("lda_model.rds")
+
+```
+
+```{r lda_probs_per_topic}
+
+n_topics = 20
+# Graph settings 
+width_height = 32
+font_size = 11 
+
+
+#word probabilities 
+
+word_topic_prob <- lda_model$phi
+topic_levels <- paste0("Topic ", 1:n_topics) 
+# Per-topic per word probabilities 
+
+
+p1 <- as.data.frame(word_topic_prob) %>%
+  mutate(Topic = paste("Topic",as.character(c(1:n_topics)))) %>%
+  pivot_longer(-Topic, names_to="Word", values_to="Probability") %>%
+  group_by(Topic) %>%
+  slice_max(Probability, n = 10) %>% 
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+    ggplot(aes(Probability, reorder(Word, Probability), fill = Topic)) + 
+    geom_col() +
+    labs(y = "", x = "Per-topic-per-word probability",
+         fill = "Topic") +
+    scale_x_continuous(n.breaks = 3) +
+    facet_wrap(~Topic, scales = "free_y") +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    theme(axis.text = element_text(size = font_size))
+  
+```
+
+```{r lda_distr_per_party}
+
+topic_probs<- lda_model$theta %>% 
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:n_topics)) %>% 
+   rownames_to_column("Question") %>%
+  left_join(questions[, c("party", "region", "mep_gender", "url")], by=c("Question"="url"))
+
+# NOTE!!!!!
+
+# Here I count question numbers based on the most probable topic per group 
+
+p2 <-   topic_probs %>%
+  select(-region, -mep_gender) %>%
+  pivot_longer(-c("Question", "party"), names_to="Topic", values_to="Share") %>%
+  group_by(Question) %>%
+  filter(Share==max(Share)) %>%
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+  ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~party)+
+  labs(y = "# questions", x = "Topic", title="Distribution per political group") +
+  theme_minimal()+
+  theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
+```
+
+```{r topic dist per region}
+p3 <- topic_probs %>%
+  select(-party, -mep_gender) %>%
+  pivot_longer(-c("Question", "region"), names_to="Topic", values_to="Share") %>%
+  group_by(Question) %>%
+  filter(Share==max(Share)) %>%
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+  ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~region)+
+  labs(y = "# questions", x = "Topic", title="Distribution per region") +
+  theme_minimal()+
+  theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
+```
+
+
+```{r save the plot}
+
+  p1 / (p2 + p3) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+  ggsave(paste0("results/lda_", k, "proption_", proportion, ".png"), width = width_height, height = width_height)
+```
+
+```{r perplexity }
+
+# Extract the necessary components
+phi <- lda_model$phi  # Topic-word distribution
+theta <- lda_model$theta  # Document-topic distribution
+dtm <- dtm_lda  # Your document-term matrix
+# Function to compute the log-likelihood
+compute_log_likelihood <- function(dtm, phi, theta) {
+  log_phi <- log(phi)  # Take the log of phi
+  log_likelihood <- 0
+  
+  # Iterate over each document
+  for (d in 1:nrow(dtm)) {
+    doc <- dtm[d, ]  # Get the term vector for the document
+    if (sum(doc) > 0) {  # Proceed if the document is not empty
+      doc_ll <- doc %*% log(t(theta[d, ] %*% phi))
+      log_likelihood <- log_likelihood + doc_ll
+    }
+  }
+  
+  return(log_likelihood)
+}
+
+# Calculate the log-likelihood
+log_likelihood <- compute_log_likelihood(dtm, phi, theta)
+
+# Calculate the number of words in the document-term matrix
+num_words <- sum(dtm)
+
+# Calculate perplexity
+perplexity <- exp(-log_likelihood / num_words)
+print(perplexity)
+```
+
+
+
+```{r MDS}
+
+#library(smacof)         
+#library(lsa)
+
+cosine_siimilarities<- cosine(topic_probs_mat)
+ttt <- outer(diag(cosine_siimilarities), diag(cosine_siimilarities)) / (cosine_siimilarities * t(cosine_siimilarities))
+ttt[is.infinite(ttt)] <- NA
+dis <- as.dist(log(ttt)) 
+dis[is.na(dis)] <- 1                       # Replace NA by 1
+res <- mds(dis)                            # Do ratio MDS with ndim = 2
+op <- par(mfrow = c(1, 2))                 # Two plots next to each other
+
+plot(res, las = 1, col = "red")            # Make a configuration plot
+plot(res, plot.type = "Shepard", las = 1,  # Make a Shepard plot
+     sub = paste("Stress-1 =",formatC(res$stress, digits = 6)))
+par(op)                                    # Return to a single plot
+
+```
+
+
+```{r heatmaps}
+
+
+topics<- data.frame(Topic = paste("Topic", as.character(c(1:20))),
+                    Content = c("Trade",
+                                "Gender and discrimination",
+                                "Fishery",
+                                "Biodiversity",
+                                "Transport",
+                                "Democratic institutions",
+                                "Finance",
+                                "COVID",
+                                "Military",
+                                "Refugees",
+                                "Pollution",
+                                "Sustainable production",
+                                "Education and youth",
+                                "Energy",
+                                "Nonsense",
+                                "Nonsense 2",
+                                "Poland stuff",
+                                "Healthcare",
+                                "Internet",
+                                "Terrorism"))
+
+total_questions_per_party <- topic_probs %>%
+  select(-region, -mep_gender) %>%
+  pivot_longer(-c("Question", "party"), names_to = "Topic", values_to = "Share") %>%
+  group_by(Question) %>%
+  filter(Share == max(Share)) %>%
+  ungroup() %>%
+  group_by(party) %>%
+  summarise(total_questions = n())
+
+# Step 2: Calculate the number of questions per topic per party
+questions_per_topic_per_party <- topic_probs %>%
+  select(-region, -mep_gender) %>%
+  pivot_longer(-c("Question", "party"), names_to = "Topic", values_to = "Share") %>%
+  group_by(Question) %>%
+  filter(Share == max(Share)) %>%
+  ungroup() %>%
+  group_by(party, Topic) %>%
+  summarise(number_questions = n()) %>%
+  left_join(total_questions_per_party, by = "party")
+
+# Plot
+ questions_per_topic_per_party %>%
+  mutate(proportion = number_questions / total_questions) %>%
+  select(party, Topic, proportion) %>%
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+  left_join(topics, by="Topic") %>%
+  ggplot(., aes(x = Content, y = party, fill = proportion)) +
+  geom_tile() +
+  scale_fill_gradient(low = "lightgray", high = "cornflowerblue", na.value = "grey50") +
+  labs(title = "Proportion of Questions per Topic per Party",
+       x = "Topic",
+       y = "Party",
+       fill = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r heatmap region}
+total_questions_per_region <- topic_probs %>%
+  select(-party, -mep_gender) %>%
+  pivot_longer(-c("Question", "region"), names_to = "Topic", values_to = "Share") %>%
+  group_by(Question) %>%
+  filter(Share == max(Share)) %>%
+  ungroup() %>%
+  group_by(region) %>%
+  summarise(total_questions = n())
+
+# Step 2: Calculate the number of questions per topic per party
+questions_per_topic_per_region <- topic_probs %>%
+  select(-party, -mep_gender) %>%
+  pivot_longer(-c("Question", "region"), names_to = "Topic", values_to = "Share") %>%
+  group_by(Question) %>%
+  filter(Share == max(Share)) %>%
+  ungroup() %>%
+  group_by(region, Topic) %>%
+  summarise(number_questions = n()) %>%
+  left_join(total_questions_per_region, by = "region")
+
+# Plot
+ questions_per_topic_per_region %>%
+  mutate(proportion = number_questions / total_questions) %>%
+  select(region, Topic, proportion) %>%
+  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+  left_join(topics, by="Topic") %>%
+  ggplot(., aes(x = Content, y = region, fill = proportion)) +
+  geom_tile() +
+  scale_fill_gradient(low = "lightgray", high = "cornflowerblue", na.value = "grey50") +
+  labs(title = "Proportion of Questions per Topic per Party",
+       x = "Topic",
+       y = "Region",
+       fill = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r Sentiment}
+### Sentiment Analysis
+# Copy dtm
+
+dtm_sent <- questions %>%
+  corpus(text_field = "text") %>%
+  tokens() %>%
+  dfm()
+```
+
+```{r sentiment2}
+# Get GI dictionary
+dict <- dictionary(data_dictionary_NRC)
+# Get results
+result_sent <- dtm_sent %>%
+  dfm_lookup(dict) %>%
+  convert(to = "data.frame") %>%
+  as_tibble()
+# Determine positive \ negative percentage
+result_sent <- result_sent %>%
+  mutate(length = ntoken(dtm_sent))
+  # Compared to all sentiment words 1 = positive -1 = negative
+result_sent <- result_sent %>%
+  mutate(sentiment_1 = (positive - negative) / (positive + negative))
+  # Compared to all words in the document
+result_sent <- result_sent %>%
+  mutate(sentiment_2 = (positive - negative) / (length))
+result_sent <- result_sent %>%
+  mutate(subjectivity = (positive + negative) / (length))
+# Show results
+result_sent
+barplot(colSums(result_sent[,c(2:11)]),
+        las = 2,
+        ylab = "Count",
+        main = "Sentiment Scores Questions")
+
+```
+
+```{r check sentiment}
+## Check correctness of sentiment analysis
+freqs = textstat_frequency(dtm_sent)
+# Check the most frequent positive words in the questions
+freqs %>%
+  as_tibble() %>%
+  filter(feature %in% dict$positive)
+# Check the most frequent negative words in the questions
+freqs %>%
+  as_tibble() %>%
+  filter(feature %in% dict$negative)
+
+```
+
+```{r sentiment - visualise}
+
+sentiments<- colnames(result_sent[, c(2:11, 13, 14)])
+
+topics_df<- topic_probs %>%
+    select(-region, -mep_gender) %>%
+    pivot_longer(-c("Question", "party"), names_to = "Topic", values_to = "Share") %>%
+    group_by(Question) %>%
+    filter(Share == max(Share))
+
+questions_sentiment<- cbind(questions, result_sent[, c(2:11, 13, 14)])
+
+sentiment_group <- topics_df %>%
+  left_join(topics, by="Topic") %>%
+  left_join(questions_sentiment, by=c("Question"="url")) %>%
+  ggplot(., aes(x = Content, y = party.x, fill = sentiment_1)) +
+  geom_tile() +
+  scale_fill_gradient(low = "red", high = "lightgreen", na.value = "white") +
+  labs(title = "Proportion of Questions per Topic per Party",
+       x = "Topic",
+       y = "Political group",
+       fill = "Sentiment") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+sentiment_region<- topics_df %>%
+  left_join(topics, by="Topic") %>%
+  left_join(questions_sentiment, by=c("Question"="url")) %>%
+  ggplot(., aes(x = Content, y = region, fill = sentiment_1)) +
+  geom_tile() +
+  scale_fill_gradient(low = "red", high = "lightgreen", na.value = "white") +
+  labs(title = "Proportion of Questions per Topic per Party",
+       x = "Topic",
+       y = "Region",
+       fill = "Sentiment") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggarrange(sentiment_group, sentiment_region, ncol=2)
+```
+

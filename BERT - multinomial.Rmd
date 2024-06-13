@@ -1,0 +1,256 @@
+---
+title: "BERT Embeddings -  Multinomial, MDS, and more"
+author: "Aleksandr Zhuravlev"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, message=FALSE, warning=FALSE}
+
+library(rlang)
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(tidymodels)
+library(viridis)
+library(patchwork)
+library(ggridges)
+library(lubridate)
+library(stringi)
+library(stringr)
+library(forcats)
+```
+
+```{r data, message=FALSE, warning=FALSE}
+# load questions and corresponding pooled embeddings
+questions <- read_csv("data/questions.csv")
+# embeddings <- read_csv("data/embeddings_python.csv")
+embeddings <- read_csv("data/Embeddings_BERT.csv")
+
+topics<- read_csv("data/topic_probs.csv")
+
+colnames(topics) <- c("url", paste0("Topic_", c(1:20)))
+# embeddings <- read_csv("data/embeddings_python_custom_mean.csv")[,1:100]
+# embeddings <- read_csv("data/embeddings_python_custom_sum.csv")[,1:100]
+
+# merge questions and embeddings
+data <- bind_cols(questions, embeddings) %>% 
+  rename_with( ~ paste0("embed", .x), matches("^\\d+$")) %>% 
+  mutate(date = decimal_date(document_date),
+         party = factor(party),
+         region = factor(region)) %>%
+  right_join(topics, by="url")
+
+```
+
+
+```{r model definition}
+
+# formula: party ~ embeddings
+f_party <- as.formula(paste("party ~", paste(grep("^embed", names(data), value = TRUE),
+                                             collapse = " + "), "+", paste(grep("^Topic", names(data), value = TRUE), collapse=" + ")))
+# formula: date ~ embeddings
+f_date <- as.formula(paste("date ~", paste(grep("^embed", names(data), value = TRUE),
+                                           collapse = " + "), "+", paste(grep("^Topic", names(data), value = TRUE), collapse=" + ")))
+# formula: region ~ embeddings
+f_region <- as.formula(paste("region ~", paste(grep("^embed", names(data), value = TRUE),
+                                               collapse = " + "), "+", paste(grep("^Topic", names(data), value = TRUE), collapse=" + ")))
+
+# Model definition --------------------------------------------------------
+
+# multinomial logit
+model_multilogit <- multinom_reg() %>% set_engine("nnet", MaxNWts= 7200)
+# linear regression
+model_linreg <- linear_reg()
+
+pred_model <- function(formula, model, data, pred_suffix = ".pred", pred_type = list("class", "prob")) {
+  fit <- workflow() %>% 
+    add_model(model) %>% 
+    add_formula(formula) %>% 
+    fit(data) 
+  
+  map_dfc(pred_type, ~predict(fit, data, type = .)) %>% 
+    rename_with(~ paste(.x, pred_suffix, sep = "_"), everything()) %>%
+    bind_cols(select(data, url))
+}
+
+```
+
+```{r train models}
+
+# party ~ embedding
+pred_party <- pred_model(f_party, model_multilogit, data, "party")
+# date ~ embedding
+pred_date <- pred_model(f_date, model_linreg, data, "date", "numeric")
+# region ~ embedding
+pred_region <- pred_model(f_region, model_multilogit, data, "region")
+# date ~ embedding per party
+pred_date_party <- map_df(
+  unique(data$party), 
+  ~ pred_model(f_date, model_linreg, filter(data, party == .x), "date_party", "numeric")
+)
+# date ~ embedding per region
+pred_date_region <- map_df(
+  unique(data$region), 
+  ~ pred_model(f_date, model_linreg, filter(data, region == .x), "date_region", "numeric")
+)
+
+# merge predictions with questions
+preds <- data %>% 
+  select(url, party, region, date) %>% 
+  left_join(pred_party, by = "url") %>% 
+  left_join(pred_region, by = "url") %>% 
+  left_join(pred_date, by = "url") %>% 
+  left_join(pred_date_party, by = "url") %>%
+  left_join(pred_date_region, by = "url")
+write_csv(preds, "results/predictions_BERT.csv")
+```
+
+
+```{r visualise}
+
+# Evaluation --------------------------------------------------------------
+
+# party classification confusion matrix
+preds %>% 
+  select(url, party, region, .pred_class_party, .pred_class_region) %>%
+  pivot_longer(-url, names_to = "model", values_to = "pred") %>% 
+  mutate(model = str_remove(model, "class_")) %>%
+  separate(model, c("model", "var"), sep = "_", fill = "left") %>% 
+  mutate(model = ifelse(is.na(model), "Truth", "Prediction"),
+         var = ifelse(var == "party", "Group", "Region")) %>%
+  pivot_wider(names_from = model, values_from = pred) %>%
+  group_by(var, Truth) %>% 
+  mutate(n_truth = n()) %>% 
+  group_by(var, Truth, Prediction) %>% 
+  summarize(prop = n()/mean(n_truth)*100) %>% 
+  ggplot(aes(Truth, Prediction, fill = prop)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(round(prop), "%")), color = "white") +
+  scale_fill_viridis(option = "mako") +
+  labs(fill = "% of truth") +
+  facet_wrap(~ var, scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1),
+        strip.text = element_text(size = 12))
+ggsave("results/confusion_matrix_BERT.png", width = 12, height = 6)
+
+# date predictions
+p1 <- preds %>%
+  pivot_longer(c(".pred_date", ".pred_date_party"),
+               names_to = "model", values_to = "pred_date") %>%
+  mutate(model = case_when(
+    model == ".pred_date" ~ "Model with all questions",
+    model == ".pred_date_party" ~ "Separate models per group"
+  )) %>%
+  ggplot(aes(date, pred_date, color = party)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_smooth(se = FALSE) +
+  labs(x = "True date", y = "Predicted date", color = "Group") +
+  scale_x_continuous(breaks = 2019:2024) +
+  facet_wrap(~ model) +
+  theme_minimal()
+p2 <- preds %>%
+  pivot_longer(c(".pred_date", ".pred_date_region"),
+               names_to = "model", values_to = "pred_date") %>%
+  mutate(model = case_when(
+    model == ".pred_date" ~ "Model with all questions",
+    model == ".pred_date_region" ~ "Separate models per region"
+  )) %>%
+  ggplot(aes(date, pred_date, color = region)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_smooth(se = FALSE) +
+  labs(x = "True date", y = "Predicted date", color = "Region",
+       caption = "Dashed line is 45-degree line") +
+  scale_x_continuous(breaks = 2019:2024) +
+  facet_wrap(~ model) +
+  theme_minimal()
+p1 / p2
+ggsave("results/date_pred_BERT.png", width = 10, height = 8)
+
+# party/region accuracy over time
+preds %>% 
+  select(url, date, party, region, .pred_class_party, .pred_class_region) %>%
+  pivot_longer(-c(url, date), names_to = "model", values_to = "pred") %>% 
+  mutate(model = str_remove(model, "class_")) %>%
+  separate(model, c("model", "var"), sep = "_", fill = "left") %>% 
+  mutate(model = ifelse(is.na(model), "Truth", "Prediction"),
+         var = ifelse(var == "party", "Group", "Region")) %>%
+  pivot_wider(names_from = model, values_from = pred)  %>%
+  mutate(month = floor_date(date_decimal(date), "month")) %>%
+  group_by(month, var, Truth) %>% 
+  mutate(n_truth = n()) %>% 
+  group_by(month, var, Truth, Prediction) %>% 
+  summarize(prop = n()/mean(n_truth)*100) %>% 
+  ggplot(aes(month, prop, color = Truth)) +
+  geom_smooth(se = FALSE) +
+  labs(x = "Date", y = "% of truth correctly predicted", color = "Truth") +
+  facet_wrap(~ var) +
+  theme_minimal()
+ggsave("results/accuracy_date_BERT.png", width = 10, height = 5)
+
+# average prediction probabilities
+p1 <- preds %>% 
+  select(url, party, matches(".pred_.*_party")) %>% 
+  select(-matches("_(class|date)_")) %>% 
+  pivot_longer(starts_with(".pred"), names_to = "model", values_to = "pred") %>%
+  separate(model, c("model", "Prediction", "var"), sep = "_") %>%
+  select(url, Truth = party, Prediction, pred) %>%
+  group_by(Truth, Prediction) %>% 
+  summarize(mean_pred = mean(pred)) %>% 
+  ungroup() %>% 
+  mutate(same = Truth == Prediction) %>%
+  ggplot(aes(Truth, mean_pred, color = Prediction)) +
+  geom_point(aes(shape = same), size = 2, show.legend = FALSE) +
+  geom_line(aes(group = Prediction), key_glyph = "point") +
+  labs(y = "Average predicted probability") +
+  scale_shape_manual(values = c(1, 19)) +
+  theme_minimal() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+p2 <- preds %>% 
+  select(url, region, matches(".pred_.*_region")) %>% 
+  select(-matches("_(class|date)_")) %>% 
+  pivot_longer(starts_with(".pred"), names_to = "model", values_to = "pred") %>%
+  separate(model, c("model", "Prediction", "var"), sep = "_") %>%
+  select(url, Truth = region, Prediction, pred) %>%
+  group_by(Truth, Prediction) %>% 
+  summarize(mean_pred = mean(pred)) %>% 
+  ungroup() %>% 
+  mutate(same = Truth == Prediction) %>%
+  ggplot(aes(Truth, mean_pred, color = Prediction)) +
+  geom_point(aes(shape = same), size = 2, show.legend = FALSE) +
+  geom_line(aes(group = Prediction), key_glyph = "point") +
+  labs(y = "Average predicted probability",
+       caption = "Filled circle: own group/region") +
+  scale_shape_manual(values = c(1, 19)) +
+  theme_minimal() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+p1 + p2
+ggsave("results/average_pred_prob_BERT.png", width = 12, height = 6)
+
+# distribution of predictions for own group vs other groups
+preds %>% 
+  select(url:`.pred_Western Europe_region`) %>% 
+  select(-contains("_class_")) %>% 
+  pivot_longer(starts_with(".pred"), names_to = "model", values_to = "pred") %>%
+  separate(model, c("model", "Prediction", "var"), sep = "_") %>%
+  mutate(match = ifelse(var == "party", party == Prediction, region == Prediction),
+         match = ifelse(match, "Predictions for own group", "Predictions for all other observations"),
+         var = ifelse(var == "party", "Political groups", "Regions")) %>% 
+  select(url, match, Prediction, pred, var) %>%
+  ggplot(aes(pred, fct_rev(Prediction), fill = match)) +
+  geom_density_ridges(alpha = 0.75, scale = 1.25) +
+  labs(x = "Predicted probability", y = "Prediction", fill = NULL) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  scale_fill_manual(values = c("grey", "coral")) +
+  facet_wrap(~ var, scales = "free_y") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+ggsave("results/pred_prob_density_BERT.png", width = 8, height = 8)
+```
