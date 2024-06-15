@@ -128,22 +128,32 @@ word_topic_prob <- lda_model$phi
 
 # Per-topic per word probabilities 
 
+topic_names <- tibble(
+  n = 1:n_topics,
+  Topic = paste("Topic", n),
+  Name = c("trade", "discrimination", "fishing", "biodiversity", "transport", "democratic institutions", "finance", "COVID-19", "foreign policy", "asylum", "pollution", "agriculture", "education", "energy", "industry", "cohesion", "legal proceedings", "health care", "internet and data", "Middle East")) %>% 
+  mutate(Name = paste(n, Name, sep = ": "))
 
 p1 <- as.data.frame(word_topic_prob) %>%
   mutate(Topic = paste("Topic",as.character(c(1:n_topics)))) %>%
   pivot_longer(-Topic, names_to="Word", values_to="Probability") %>%
-  group_by(Topic) %>%
+  left_join(topic_names) %>% 
+  mutate(Name = factor(Name, levels = topic_names$Name)) %>%
+  group_by(Name) %>%
   slice_max(Probability, n = 10) %>% 
-    ggplot(aes(Probability, reorder(Word, Probability), fill = Topic)) + 
+    ggplot(aes(Probability, reorder_within(Word, Probability, Name), fill = Name)) + 
     geom_col() +
     labs(y = "", x = "Per-topic-per-word probability",
          fill = "Topic") +
     scale_x_continuous(n.breaks = 3) +
-    facet_wrap(~Topic, scales = "free_y") +
+    scale_y_reordered() +
+    facet_wrap(~Name, ncol = 4, scales = "free_y") +
     theme_minimal() +
     theme(legend.position = "none") +
-    theme(axis.text = element_text(size = font_size))
-  
+    theme(axis.text = element_text(size = font_size),
+          strip.text = element_text(size = font_size + 2),
+          strip.clip = "off")
+ggsave("results/lda_words.png", p1, width = 10, height = 10)
 ```
 
 ```{r lda_distr_per_party}
@@ -156,38 +166,66 @@ topic_probs<- lda_model$theta %>%
 
 # NOTE!!!!!
 
-# Here I count question numbers based on the most probable topic per group 
-topic_levels <- paste0("Topic ", 1:n_topics) 
-p2 <-   topic_probs %>%
-  select(-region, -mep_gender) %>%
-  pivot_longer(-c("Question", "party"), names_to="Topic", values_to="Share") %>%
-  group_by(Question) %>%
-  filter(Share==max(Share)) %>%
-  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
-  ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~party)+
-  labs(y = "# questions", x = "Topic", title="Distribution per political group") +
-  theme_minimal()+
-  theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
+p2 <- topic_probs %>% 
+  pivot_longer(starts_with("Topic"), names_to = "Topic", values_to = "Prob") %>%
+  group_by(Question) %>% 
+  slice_max(Prob) %>% 
+  ungroup() %>% 
+  pivot_longer(c(party, region), names_to = "Type", values_to = "Cat") %>% 
+  count(Type, Cat, Topic) %>% 
+  group_by(Type, Cat) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup() %>% 
+  left_join(select(topic_names, -n), by = "Topic") %>% 
+  mutate(Name = factor(Name, levels = topic_names$Name),
+         Type = ifelse(Type == "party", "Group", "Region")) %>% 
+  ggplot(aes(Name, Cat, fill = prop)) +
+  geom_tile() + 
+  labs(x = NULL, y = NULL, fill = "Proportion of\nquestions in\neach topic\nper group") +
+  scale_fill_gradient(low = "cornflowerblue", high = "cornsilk") +
+  facet_wrap(~ Type, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text = element_text(size = font_size + 1),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        strip.text = element_text(size = font_size + 2),
+        strip.clip = "off")
+ggsave("results/topic_distribution.png", p2, width = 11, height = 4.5)
+```
+
+```{r lda_distr_per_region}
+
+# # Here I count question numbers based on the most probable topic per group 
+# topic_levels <- paste0("Topic ", 1:n_topics) 
+# p2 <-   topic_probs %>%
+#   select(-region, -mep_gender) %>%
+#   pivot_longer(-c("Question", "party"), names_to="Topic", values_to="Share") %>%
+#   group_by(Question) %>%
+#   filter(Share==max(Share)) %>%
+#   mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+#   ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~party)+
+#   labs(y = "# questions", x = "Topic", title="Distribution per political group") +
+#   theme_minimal()+
+#   theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
 ```
 
 ```{r topic dist per region}
-p3 <- topic_probs %>%
-  select(-party, -mep_gender) %>%
-  pivot_longer(-c("Question", "region"), names_to="Topic", values_to="Share") %>%
-  group_by(Question) %>%
-  filter(Share==max(Share)) %>%
-  mutate(Topic = factor(Topic, levels = topic_levels)) %>%
-  ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~region)+
-  labs(y = "# questions", x = "Topic", title="Distribution per region") +
-  theme_minimal()+
-  theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
+# p3 <- topic_probs %>%
+#   select(-party, -mep_gender) %>%
+#   pivot_longer(-c("Question", "region"), names_to="Topic", values_to="Share") %>%
+#   group_by(Question) %>%
+#   filter(Share==max(Share)) %>%
+#   mutate(Topic = factor(Topic, levels = topic_levels)) %>%
+#   ggplot(., aes(x=Topic, y=Share)) + geom_col(position="stack") + facet_wrap(~region)+
+#   labs(y = "# questions", x = "Topic", title="Distribution per region") +
+#   theme_minimal()+
+#   theme(axis.text = element_text(size = font_size, angle = 45, hjust = 1, vjust = 0.5))
 ```
 
 
 ```{r save the plot}
 
-  p1 / (p2 + p3) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
-  ggsave(paste0("results/lda_", k, "proption_", proportion, ".png"), width = width_height, height = width_height)
+  # p1 / (p2 + p3) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+  # ggsave(paste0("results/lda_", k, "proption_", proportion, ".png"), width = width_height, height = width_height)
 ```
 
 ```{r perplexity }

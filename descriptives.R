@@ -84,3 +84,15 @@ bind_rows(
         axis.text = element_text(size = 12),
         strip.text = element_text(size = 12))
 ggsave("results/counts.png", width = 10, height = 5)
+
+
+# test heatmap with black-white text
+questions %>% 
+  count(party, region) %>% 
+  mutate(n = n / sum(n) * 100,
+         lab = paste(round(n), "%")) %>%
+  ggplot(aes(region, party, fill = n)) +
+  geom_tile() +
+  shadowtext::geom_shadowtext(aes(label = lab), size = 4) +
+  scale_fill_viridis_c() +
+  theme_minimal()
