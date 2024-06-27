@@ -1,0 +1,594 @@
+---
+title: "BERT Fine-Tuning"
+author: "Aleksandr Zhuravlev"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{python packages}
+import string # Used to remove stopwords
+import nltk
+from nltk.corpus import stopwords
+import gensim
+import json
+import pickle
+import re  # For preprocessing
+import pandas as pd  # For data handling
+from time import time  # To time our operations
+from collections import defaultdict  # For word frequency
+from gensim.models.phrases import Phrases, Phraser
+import multiprocessing
+from gensim.models import Word2Vec
+import string # Used to remove stopwords
+from nltk.corpus import stopwords
+import json
+
+import torch
+from transformers import BertModel, BertTokenizer
+from nltk.corpus import stopwords
+from collections import namedtuple
+from collections.abc import Mapping
+```
+
+
+
+```{python get_data}
+questions =  pd.read_csv("data/questions.csv")
+```
+
+```{python preprocess_functions}
+
+
+def column_to_lower(df, column):
+    return df[column].str.lower()
+
+def column_remove_punctuation(df, column):
+    return df[column].str.replace('[{}]'.format(string.punctuation), '')
+
+def column_remove_stop_words(df, column, stopwords):
+    print(f"Currently processing the column: {column}")
+    return df[column].apply(lambda x: ' '.join([word for word in x.split() if word not in (stopwords)]))
+  
+def remove_references(text):
+    return re.sub(r"\[\d+\]", "", text)
+
+def remove_newlines(text):
+    return text.replace("\n", "")
+
+def remove_links(text):
+    return re.sub(r"https?://\S+", "", text)
+  
+
+
+```
+
+
+
+```{python cleaning }
+
+# Parse stop words
+stop_words = stopwords.words('english')
+custom_stop_words = ["eu", "european", "commission", "member", "can", "view", "submitted", "rights", "states", "state", "ensure", "union"]
+stop_words.extend(custom_stop_words)
+
+# Clean the text
+#questions['text'] = column_to_lower(questions, 'text')
+#questions['text'] = column_remove_punctuation(questions, 'text')
+#questions['text'] = column_remove_stop_words(questions, 'text', stop_words)
+questions['text'] = questions['text'].apply(remove_references)
+questions['text'] = questions['text'].apply(remove_newlines)
+questions['text'] = questions['text'].apply(remove_links)
+```
+
+```{python model setup}
+
+#Use the base model 
+model_name = 'bert-base-uncased'
+tokenizer = BertTokenizer.from_pretrained(model_name)
+model = BertModel.from_pretrained(model_name)
+
+# Check if CUDA is available and move model to GPU if possible
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+
+#Prepare storage 
+CLS_embeddings = list()
+
+# Iterate over each text 
+for i in range(questions.shape[0]):
+#for i in range(5):
+  # Tokenise the input text 
+  
+  inputs = tokenizer(questions['text'][i], return_tensors='pt').to(device)
+  input_ids = inputs['input_ids'][0]
+  input_size = input_ids.size(0)
+  
+  # If the tokenized input size is greater than 512, truncate it
+  if input_size > 512:
+      input_ids = torch.cat((input_ids[:256], input_ids[-256:]))
+      attention_mask = torch.cat((inputs['attention_mask'][0][:256], inputs['attention_mask'][0][-256:]))
+      
+      inputs = {
+          'input_ids': input_ids.unsqueeze(0),
+          'attention_mask': attention_mask.unsqueeze(0)
+      }
+  else:
+      inputs = {
+          'input_ids': inputs['input_ids'],
+          'attention_mask': inputs['attention_mask']
+      }
+  #Fit the model 
+  
+  outputs = model(**inputs, output_hidden_states=True)
+  
+  # Get the final embedding
+  #"hidden state" refers to the vector representation of each token in the sequence after it has been processed by the model.
+  last_hidden_states = outputs.hidden_states[-1]
+  
+  # Extract and append the CLS token 
+  CLS_value =last_hidden_states[0,0,:].tolist()
+  CLS_embeddings.append(CLS_value)
+  if (i % 100 == 0):
+    print(f"Embedding {i} ready")
+
+```
+
+```{python get df}
+df = pd.DataFrame(CLS_embeddings)
+df.to_csv("data/Embeddings_CLS")
+```
+
+
+```{r libraries}
+
+library(cluster)
+library(tidyverse)
+library(ggpubr)
+library(lsa) #cosine()
+```
+
+```{r data, message=FALSE, warning=FALSE}
+# load questions and corresponding pooled embeddings
+questions <- read_csv("data/questions.csv")
+# embeddings <- read_csv("data/embeddings_python.csv")
+embeddings <- read_csv("data/Embeddings_CLS")[2:769]
+
+topics<- read_csv("data/topic_probs.csv")
+
+colnames(topics) <- c("url", paste0("Topic_", c(1:20)))
+
+```
+
+```{r smart merge}
+
+problem_doc <- anti_join(questions, topics, by="url") %>% pull(1)
+
+problem_number <- which(questions$url==problem_doc)
+
+questions<- questions[-problem_number, ]
+embeddings<- embeddings[-problem_number, ]
+```
+
+```{r pre-process topics}
+
+topic_names<- c("url", "Trade", "Gender and discrimination",
+                                "Fishery",
+                                "Biodiversity",
+                                "Transport",
+                                "Democratic institutions",
+                                "Finance",
+                                "COVID",
+                                "Military",
+                                "Refugees",
+                                "Pollution",
+                                "Sustainable production",
+                                "Education and youth",
+                                "Energy",
+                                "Nonsense",
+                                "Nonsense 2",
+                                "Poland stuff",
+                                "Healthcare",
+                                "Internet",
+                                "Terrorism")
+colnames(topics)<-topic_names 
+
+
+max_topics<- topics %>%
+  pivot_longer(-url, names_to = "Topic", values_to = "Prob") %>%
+  group_by(url) %>%
+  arrange(desc(Prob)) %>%
+  slice_max(Prob, n = 1, with_ties = FALSE)
+  
+  
+```
+
+```{r Summed Embeddings - Groups}
+mean_group_embeds<- embeddings %>%
+  mutate(Group = data$party) %>%
+  group_by(Group) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
+  pivot_longer(cols = -Group, names_to = "Embed", values_to = "Value") %>%
+  pivot_wider(names_from = Group, values_from = Value) %>%
+  select(-Embed)
+
+```
+
+```{r cosine_similarities - Groups}
+embed_cosine_sim<-cosine(as.matrix(mean_group_embeds))
+
+group_sims<- as.data.frame(embed_cosine_sim) %>%
+  mutate(Group_1 = rownames(embed_cosine_sim)) %>%
+  pivot_longer(-Group_1, names_to="Group_2", values_to="Cosine similarity") %>%
+  ggplot(., aes(x=Group_2, y=Group_1, fill=`Cosine similarity`)) + geom_tile() +
+  scale_fill_gradient(low = "lightgray", high = "cornflowerblue", na.value = "grey50") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="(a) Group level", x="", y="") + coord_fixed(ratio = 1)
+
+group_sims
+```
+
+```{r Summed Embeddings - Region}
+mean_region_embeds<- embeddings %>%
+  mutate(Region = data$region) %>%
+  group_by(Region) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
+  pivot_longer(cols = -Region, names_to = "Embed", values_to = "Value") %>%
+  pivot_wider(names_from = Region, values_from = Value) %>%
+  select(-Embed)
+
+```
+
+```{r cosine_similarities - Region}
+embed_cosine_sim_region<-cosine(as.matrix(mean_region_embeds))
+
+region_sims<- as.data.frame(embed_cosine_sim_region) %>%
+  mutate(Region_1 = rownames(embed_cosine_sim_region)) %>%
+  pivot_longer(-Region_1, names_to="Region_2", values_to="Cosine similarity") %>%
+  ggplot(., aes(x=Region_2, y=Region_1, fill=`Cosine similarity`)) + geom_tile() +
+  scale_fill_gradient(low = "lightgray", high = "cornflowerblue", na.value = "grey50") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="(b) Region level", x="", y="") + coord_fixed(ratio = 1)
+
+region_sims
+```
+
+
+```{r similarities combined}
+ggarrange(group_sims, region_sims, ncol=2) # Save with 1200 x 500
+```
+
+
+```{python BERT fine-tuning-1 testrain split}
+questions =  pd.read_csv("data/questions.csv")
+questions['text'] = questions['text'].apply(remove_references)
+questions['text'] = questions['text'].apply(remove_newlines)
+questions['text'] = questions['text'].apply(remove_links)
+
+
+```
+
+
+```{python BERT fine-tuning-2 CUDA}
+import tensorflow as tf
+from transformers import BertForSequenceClassification, AdamW, BertConfig
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+```
+
+```{python BERT fine-tuning-3 tokenisation}
+model_name = 'bert-base-uncased'
+tokenizer = BertTokenizer.from_pretrained(model_name)
+model = BertModel.from_pretrained(model_name)
+max_seq_length = 512
+
+```
+
+```{python tokenise everything}
+input_ids = []
+
+for sent in questions["text"]:
+    # Tokenize the sentence
+    encoded_dict = tokenizer.encode_plus(
+                        sent,                      # Sentence to encode
+                        add_special_tokens=True,   # Add '[CLS]' and '[SEP]'
+                        return_tensors='pt',       # Return PyTorch tensors
+                   )
+    
+    # Extract the input_ids tensor
+    input_ids_tensor = encoded_dict['input_ids']
+    input_ids.append(input_ids_tensor)
+    
+    
+
+```
+
+```{python check sizes}
+sizes = []
+for i in range(len(questions["text"])):
+  sizes.append(input_ids[i].size(1))
+
+import matplotlib.pyplot as plt
+
+plt.hist(sizes, bins=5, edgecolor='black')
+
+# Add a title and labels
+plt.title('Histogram of Sizes')
+plt.xlabel('Size')
+plt.ylabel('Frequency')
+
+# Show the plot
+plt.show()  
+  
+```
+
+
+
+```{python Indian guy 1}
+NUM_LABELS = len(questions["party"])
+
+id2label = {id:label for id, label in enumerate(questions["party"])}
+label2id = {label:id for id, label in enumerate(questions["party"])}
+
+questions["labels"] = questions.party.map(lambda x: label2id[x.strip()])
+```
+
+```{python indian guy 2}
+#Tokeniser
+
+# Model
+model_name = 'bert-base-uncased'
+model = BertForSequenceClassification.from_pretrained(model_name, num_labels=NUM_LABELS,
+id2label=id2label, label2id=label2id)
+
+model.to(device)
+
+```
+
+```{python splitting}
+
+import random
+random.seed(123456)
+questions_shuffled = questions.sample(frac=1)
+
+SIZE= questions_shuffled.shape[0]
+
+train_texts= list(questions_shuffled.text[:(3*SIZE)//4])
+
+val_texts=   list(questions_shuffled.text[SIZE//2:(3*SIZE)//4 ])
+
+
+train_labels= list(questions_shuffled.labels[:(3*SIZE)//4])
+
+val_labels=   list(questions_shuffled.labels[SIZE//2:(3*SIZE)//4 ])
+
+len(train_texts), len(val_texts)
+```
+
+```{python tokeniser}
+tokenizer = BertTokenizer.from_pretrained(model_name)
+train_encodings = tokenizer(train_texts, truncation=True, padding=True)
+val_encodings  = tokenizer(val_texts, truncation=True, padding=True)
+
+
+```
+
+
+```{python clean rubbish}
+import gc
+
+gc.collect()
+
+torch.cuda.empty_cache()
+```
+```{python define classes}
+from torch.utils.data import Dataset
+class DataLoader(Dataset):
+    """
+    Custom Dataset class for handling tokenized text data and corresponding labels.
+    Inherits from torch.utils.data.Dataset.
+    """
+    def __init__(self, encodings, labels):
+        """
+        Initializes the DataLoader class with encodings and labels.
+
+        Args:
+            encodings (dict): A dictionary containing tokenized input text data
+                              (e.g., 'input_ids', 'token_type_ids', 'attention_mask').
+            labels (list): A list of integer labels for the input text data.
+        """
+        self.encodings = encodings
+        self.labels = labels
+
+    def __getitem__(self, idx):
+        """
+        Returns a dictionary containing tokenized data and the corresponding label for a given index.
+
+        Args:
+            idx (int): The index of the data item to retrieve.
+
+        Returns:
+            item (dict): A dictionary containing the tokenized data and the corresponding label.
+        """
+        # Retrieve tokenized data for the given index
+        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+        # Add the label for the given index to the item dictionary
+        item['labels'] = torch.tensor(self.labels[idx])
+        return item
+
+    def __len__(self):
+        """
+        Returns the number of data items in the dataset.
+
+        Returns:
+            (int): The number of data items in the dataset.
+        """
+        return len(self.labels)
+```
+
+```{python dataloaders}
+
+
+train_dataloader = DataLoader(train_encodings, train_labels)
+
+val_dataloader = DataLoader(val_encodings, val_labels)
+
+
+```
+
+```{python training}
+from transformers import TrainingArguments, Trainer
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+def compute_metrics(pred):
+    """
+    Computes accuracy, F1, precision, and recall for a given set of predictions.
+    
+    Args:
+        pred (obj): An object containing label_ids and predictions attributes.
+            - label_ids (array-like): A 1D array of true class labels.
+            - predictions (array-like): A 2D array where each row represents
+              an observation, and each column represents the probability of 
+              that observation belonging to a certain class.
+              
+    Returns:
+        dict: A dictionary containing the following metrics:
+            - Accuracy (float): The proportion of correctly classified instances.
+            - F1 (float): The macro F1 score, which is the harmonic mean of precision
+              and recall. Macro averaging calculates the metric independently for
+              each class and then takes the average.
+            - Precision (float): The macro precision, which is the number of true
+              positives divided by the sum of true positives and false positives.
+            - Recall (float): The macro recall, which is the number of true positives
+              divided by the sum of true positives and false negatives.
+    """
+    # Extract true labels from the input object
+    labels = pred.label_ids
+    
+    # Obtain predicted class labels by finding the column index with the maximum probability
+    preds = pred.predictions.argmax(-1)
+    
+    # Compute macro precision, recall, and F1 score using sklearn's precision_recall_fscore_support function
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
+    
+    # Calculate the accuracy score using sklearn's accuracy_score function
+    acc = accuracy_score(labels, preds)
+    
+    # Return the computed metrics as a dictionary
+    return {
+        'Accuracy': acc,
+        'F1': f1,
+        'Precision': precision,
+        'Recall': recall
+    }
+```
+
+```{python compute metrics}
+from transformers import TrainingArguments, Trainer
+
+class CustomTrainer(Trainer):
+    def __init__(self, *args, cache_cleanup_steps=100, memory_threshold=0.9, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cache_cleanup_steps = cache_cleanup_steps
+        self.memory_threshold = memory_threshold
+
+    def training_step(self, *args, **kwargs):
+        if self.state.global_step % self.cache_cleanup_steps == 0:
+            # Check memory usage
+            memory_allocated = torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory
+            if memory_allocated > self.memory_threshold:
+                torch.cuda.empty_cache()
+        return super().training_step(*args, **kwargs)
+      
+      
+training_args = TrainingArguments(
+    output_dir='/BERT_fine_tuned_model', 
+    do_train=True,
+    do_eval=True,
+    num_train_epochs=3,              
+    per_device_train_batch_size=4,  
+    per_device_eval_batch_size=4,
+    warmup_steps=100,                
+    weight_decay=0.01,
+    logging_strategy='steps',
+    logging_dir='./multi-class-logs',            
+    logging_steps=50,
+    evaluation_strategy="steps",
+    eval_steps=50,
+    save_strategy="steps", 
+    fp16=True,
+    load_best_model_at_end=True
+)
+
+# Instantiate the custom trainer
+trainer = CustomTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataloader,
+    eval_dataset=val_dataloader,
+    compute_metrics=compute_metrics,
+    cache_cleanup_steps=100,  # Set the interval for cache cleanup
+    memory_threshold=0.8  # Set the memory threshold for cache cleanup
+)
+
+trainer.train()
+```
+
+```{python final}
+q=[trainer.evaluate(eval_dataset=df_org) for df_org in [train_dataloader, val_dataloader, test_dataset]]
+
+pd.DataFrame(q, index=["train","val","test"]).iloc[:,:5]
+```
+
+```{python final steps}
+from transformers import DistilBertForSequenceClassification, DistilBertTokenizerFast
+
+def predict(text):
+    """
+    Predicts the class label for a given input text
+
+    Args:
+        text (str): The input text for which the class label needs to be predicted.
+
+    Returns:
+        probs (torch.Tensor): Class probabilities for the input text.
+        pred_label_idx (torch.Tensor): The index of the predicted class label.
+        pred_label (str): The predicted class label.
+    """
+    # Tokenize the input text and move tensors to the GPU if available
+    inputs = tokenizer(text, padding=True, truncation=True, max_length=512, return_tensors="pt").to("cuda")
+
+    # Get model output (logits)
+    outputs = model(**inputs)
+
+    probs = outputs[0].softmax(1)
+    """ Explanation outputs: The BERT model returns a tuple containing the output logits (and possibly other elements depending on the model configuration). In this case, the output logits are the first element in the tuple, which is why we access it using outputs[0].
+
+    outputs[0]: This is a tensor containing the raw output logits for each class. The shape of the tensor is (batch_size, num_classes) where batch_size is the number of input samples (in this case, 1, as we are predicting for a single input text) and num_classes is the number of target classes.
+
+    softmax(1): The softmax function is applied along dimension 1 (the class dimension) to convert the raw logits into class probabilities. Softmax normalizes the logits so that they sum to 1, making them interpretable as probabilities. """
+
+    # Get the index of the class with the highest probability
+    # argmax() finds the index of the maximum value in the tensor along a specified dimension.
+    # By default, if no dimension is specified, it returns the index of the maximum value in the flattened tensor.
+    pred_label_idx = probs.argmax()
+
+    # Now map the predicted class index to the actual class label 
+    # Since pred_label_idx is a tensor containing a single value (the predicted class index), 
+    # the .item() method is used to extract the value as a scalar
+    pred_label = model.config.id2label[pred_label_idx.item()]
+
+    return probs, pred_label_idx, pred_label
+```
+
+
+```{python predict}
+# Test with a an example text in Turkish
+text = "We need to protect the Envrionment, people!"
+# "Machine Learning itself is moving towards more and more automated"
+predict(text)
+```

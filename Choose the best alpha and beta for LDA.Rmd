@@ -1,0 +1,165 @@
+---
+title: "Check perplexity"
+author: "Aleksandr Zhuravlev"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pacakges, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(textclean)
+library(stopwords)
+library(topicmodels)
+library(patchwork)
+library(textstem)
+library(textmineR)
+library(cluster)
+```
+
+```{r functions}
+compute_log_likelihood <- function(dtm, phi, theta) {
+  log_phi <- log(phi)  # Take the log of phi
+  log_likelihood <- 0
+  
+  # Iterate over each document
+  for (d in 1:nrow(dtm)) {
+    doc <- dtm[d, ]  # Get the term vector for the document
+    if (sum(doc) > 0) {  # Proceed if the document is not empty
+      doc_ll <- doc %*% log(t(theta[d, ] %*% phi))
+      log_likelihood <- log_likelihood + doc_ll
+    }
+  }
+  
+  return(log_likelihood)
+}
+```
+
+```{r Tokenisation}
+# Tokenization ------------------------------------------------------------
+# improve with phrases, etc.
+
+library(sjmisc)
+
+questions <- read_csv("data/questions.csv")
+
+stopwords<- c(data_stopwords_snowball$en, 
+                      "eu", "european", "commission", "member", 
+                      "can", "view", "submitted", "rights", "states", 
+                      "state", "ensure" )
+words <- questions %>% 
+  mutate(text = str_replace_all(text, "\\[\\d+\\]|\n|https?://\\S+", " "),
+         text = replace_contraction(text), 
+         text = removeNumbers(text),
+         text = str_replace_all(text, "\\s+", " "),
+         text = lemmatize_strings(text))
+  
+
+# Extract unigrams
+unigrams <- words %>%
+  unnest_tokens(word, text, token = "words") %>%
+  filter(!(word %in% stopwords))
+
+# Extract bigrams & remove those containing stopwords 
+bigrams <- words %>%
+  unnest_tokens(word, text, token = "ngrams", n = 2) %>%
+  separate(word, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stopwords, 
+         !word2 %in% stopwords) %>%
+  unite(word, word1, word2, sep = " ")
+
+  
+words <- bind_rows(unigrams, bigrams)
+
+
+frequent_words <- words %>% 
+  count(word) %>% 
+  filter(n >= 20) %>%  # Adjust the threshold as needed
+  select(word)
+
+words <- words %>%
+  filter(word %in% frequent_words$word)
+gc()
+
+```
+
+```{r LDA}
+# Fit LDA -----------------------------------------------------------------
+set.seed(123)
+# get document-term matrix
+
+proportion = 50
+
+
+dtm <- words %>% 
+  count(url, word) %>% 
+  bind_tf_idf(word, url, n) %>% 
+  # keep only words that appear in less than 90% of documents
+  slice_max(idf, prop = (proportion/100)) %>%
+  cast_dtm(url, word, n)
+
+
+dtm_lda <- Matrix::Matrix(as.matrix(dtm), sparse = T)
+gc()
+```
+
+
+```{r lda_new}
+set.seed(123)
+
+models_list<- list()
+perplexities<- c()
+
+betas<- c(0.01, 0.025, 0.05, 0.06, 0.075, 0.1, 0.2, 0.3, 0.4, 0.5)
+alphas<- c()
+count <- 1
+
+for (i in betas){
+  
+lda_model <- FitLdaModel(dtm = dtm_lda, 
+                        k = 20, 
+                        beta=i,
+                        alpha=0.1,
+                        optimize_alpha=TRUE,
+                        iterations = 1000,
+                        calc_coherence = F
+                        )
+
+# Extract the necessary components
+phi <- lda_model$phi  # Topic-word distribution
+theta <- lda_model$theta  # Document-topic distribution
+dtm <- dtm_lda  #  document-term matrix
+# Function to compute the log-likelihood
+
+# Calculate the log-likelihood
+log_likelihood <- compute_log_likelihood(dtm, phi, theta)
+
+# Calculate the number of words in the document-term matrix
+num_words <- sum(dtm)
+
+# Calculate perplexity
+perplexity <- exp(-log_likelihood / num_words)
+
+print(perplexity)
+print(paste0("finished iteration with beta #", as.character(i)))
+
+models_list[[count]] <- lda_model
+perplexities<-append(perplexities, perplexity)
+alphas<-append(alphas, lda_model$alpha)
+
+count<- count +1 
+gc()
+}
+```
+
+```{r save perplexity}
+
+df_res <- data.frame(alpha=alphas, beta=rep(betas, each=20), topic = rep(paste("Topic", c(1:20)), 10), perplexity = rep(perplexities, each=20))
+write.csv(df_res, "perplexities_for_betas.csv")
+```
+

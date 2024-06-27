@@ -10,16 +10,17 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r libraries}
-library(smacof)
+library(lsa)
 library(cluster)
 library(tidyverse)
+library(ggpubr)
 ```
 
 ```{r data, message=FALSE, warning=FALSE}
 # load questions and corresponding pooled embeddings
 questions <- read_csv("data/questions.csv")
 # embeddings <- read_csv("data/embeddings_python.csv")
-embeddings <- read_csv("data/Embeddings_BERT.csv")[2:769]
+embeddings <- read_csv("data/Embeddings_CLS.csv")[2:769]
 
 topics<- read_csv("data/topic_probs.csv")
 
@@ -70,7 +71,7 @@ max_topics<- topics %>%
   
 ```
 
-```{r train PCA}
+```{r train PCA, eval=FALSE}
 
 embed_mat <- as.matrix(embeddings)
 
@@ -78,7 +79,7 @@ PCA_res <- prcomp(embed_mat, center=TRUE, scale=TRUE)
 
 ```
 
-```{r visualise PCA}
+```{r visualise PCA, eval=FALSE}
 as.data.frame(PCA_res$x) %>%
   cbind(max_topics) %>%
   mutate(Topic = as.factor(Topic)) %>%
@@ -175,20 +176,23 @@ mean_group_embeds<- embeddings %>%
   summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
   pivot_longer(cols = -Group, names_to = "Embed", values_to = "Value") %>%
   pivot_wider(names_from = Group, values_from = Value) %>%
-  select(-Embed)
+  dplyr::select(-Embed)
 
 ```
 
 ```{r cosine_similarities - Groups}
 embed_cosine_sim<-cosine(as.matrix(mean_group_embeds))
 
-as.data.frame(embed_cosine_sim) %>%
+group_sims<- as.data.frame(embed_cosine_sim) %>%
   mutate(Group_1 = rownames(embed_cosine_sim)) %>%
   pivot_longer(-Group_1, names_to="Group_2", values_to="Cosine similarity") %>%
   ggplot(., aes(x=Group_2, y=Group_1, fill=`Cosine similarity`)) + geom_tile() +
   scale_fill_gradient(low = "lightgray", high = "cornflowerblue", na.value = "grey50") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="(a) Group level", x="", y="") + coord_fixed(ratio = 1)
+
+group_sims
 ```
 
 ```{r Summed Embeddings - Region}
@@ -198,18 +202,26 @@ mean_region_embeds<- embeddings %>%
   summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
   pivot_longer(cols = -Region, names_to = "Embed", values_to = "Value") %>%
   pivot_wider(names_from = Region, values_from = Value) %>%
-  select(-Embed)
+  dplyr::select(-Embed)
 
 ```
 
 ```{r cosine_similarities - Region}
 embed_cosine_sim_region<-cosine(as.matrix(mean_region_embeds))
 
-as.data.frame(embed_cosine_sim_region) %>%
+region_sims<- as.data.frame(embed_cosine_sim_region) %>%
   mutate(Region_1 = rownames(embed_cosine_sim_region)) %>%
   pivot_longer(-Region_1, names_to="Region_2", values_to="Cosine similarity") %>%
   ggplot(., aes(x=Region_2, y=Region_1, fill=`Cosine similarity`)) + geom_tile() +
   scale_fill_gradient(low = "lightgray", high = "cornflowerblue", na.value = "grey50") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="(b) Region level", x="", y="") + coord_fixed(ratio = 1)
+
+region_sims
+```
+
+
+```{r similarities combined}
+ggarrange(group_sims, region_sims, ncol=2) # Save with 1200 x 500
 ```
