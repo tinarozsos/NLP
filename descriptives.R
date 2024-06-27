@@ -2,13 +2,15 @@ library(tidyverse)
 library(readxl)
 library(tidytext)
 library(patchwork)
+library(mapdata)
 
 # main data
 questions <- read_csv("data/questions.csv")
 # number of MEPs per party
 parties <- read_excel("data/party_descriptions.xlsx")
 # number of MEPs per country
-countries <- read_csv("data/mep_party.csv") %>% count(country) 
+mep_party <- read_csv("data/mep_party.csv")
+countries <- mep_party %>% count(country) 
 
 # list of countries per region
 regions <- list(
@@ -96,3 +98,17 @@ questions %>%
   shadowtext::geom_shadowtext(aes(label = lab), size = 4) +
   scale_fill_viridis_c() +
   theme_minimal()
+
+# map of region definitions
+eu_map <- map_data("world") %>% 
+  rename(country = region) %>% 
+  mutate(country = ifelse(country == "Czech Republic", "Czechia", country)) %>%
+  left_join(regions, by = c("country"))
+ggplot(eu_map, aes(long, lat, group = group)) +
+  geom_polygon(aes(fill = region), color = "black") +
+  coord_fixed(xlim = c(-15, 30), ylim = c(35, 70)) +
+  scale_fill_discrete(na.value = "grey90") +
+  theme_void() + 
+  theme(legend.title = element_text(size = 22),
+        legend.text = element_text(size = 20))
+ggsave("results/regions.png", width = 10, height = 10)
